@@ -898,9 +898,10 @@ def _exit_sleep_mode():
     _set_wifi_block(False)
     _restore_fan_state()
 
-    # Restart camera pipeline in still mode for instant capture
+    # Restart camera pipeline in the live-view config (still_config on
+    # small sensors, lightweight preview config on large sensors)
     try:
-        picam2.configure(still_config)
+        picam2.configure(_preview_running_config)
         picam2.start()
         picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
         time.sleep(0.1)
@@ -2352,7 +2353,14 @@ _zoom_level_idx = 0
 TAP_ZOOM_BARRIER_PAD = 12
 _preview_geom = {"x": 0, "y": 0, "w": SCREEN_W, "h": SCREEN_H}
 
-def _choose_preview_size(full_w, full_h, oversample=2.0, max_long_edge=1920):
+def _choose_preview_size(full_w, full_h, oversample=1.5, max_long_edge=1280):
+    """Pick a preview-stream size for the live view.
+
+    The Pi 5's 4" touchscreen is 800x480, so oversampling much beyond ~1.5×
+    wastes ISP bandwidth without improving what the user sees.  The
+    previous defaults (oversample=2.0, max_long_edge=1920) requested a
+    1600-wide lores stream which made the 47 MP IMX492 pipeline unusable.
+    """
     if not (full_w and full_h):
         return (SCREEN_W, SCREEN_H)
     aspect = full_w / full_h
@@ -4106,7 +4114,7 @@ def _enter_video_mode(resolution_idx=0):
         traceback.print_exc()
         # Attempt to restore still mode
         try:
-            picam2.configure(still_config)
+            picam2.configure(_preview_running_config)
             picam2.start()
             picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
         except Exception:
@@ -4138,7 +4146,7 @@ def _exit_video_mode():
 
     try:
         picam2.stop()
-        picam2.configure(still_config)
+        picam2.configure(_preview_running_config)
         picam2.start()
         picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
         _apply_shutter_controls()
@@ -6613,6 +6621,30 @@ still_config = picam2.create_still_configuration(
     buffer_count=_STILL_BUFFER_COUNT,
 )
 
+# Lightweight running config used during live view on large sensors.
+# Producing a full-resolution RGB888 main stream every preview frame is
+# what made the IMX492 (47 MP) unusable — the ISP simply can't scale
+# 8288x5644 to RGB888 at 30 fps on a Pi 5.  For any sensor above ~20 MP
+# we therefore run a small preview config (lores-only, no raw) during
+# the live view and briefly switch to `still_config` for the actual
+# capture so JPG+DNG still come out at native resolution.
+USE_LIGHTWEIGHT_PREVIEW = (FULL_W * FULL_H) > 20_000_000
+
+if USE_LIGHTWEIGHT_PREVIEW:
+    _preview_running_config = picam2.create_video_configuration(
+        main={"size": preview_size, "format": "RGB888"},
+        lores=None,
+        raw=None,
+        controls=dict(_STILL_CONTROLS),
+        buffer_count=3,
+    )
+    PREVIEW_STREAM_NAME = "main"
+    print(f"[Camera] Using lightweight preview config: main={preview_size} "
+          f"(full-res capture via switch_mode)")
+else:
+    _preview_running_config = still_config
+    PREVIEW_STREAM_NAME = "lores"
+
 _aspect_capture_dims = [
     _largest_ratio_crop_dims(FULL_W, FULL_H, opt["ratio"]) for opt in ASPECT_OPTIONS
 ]
@@ -6620,9 +6652,11 @@ _aspect_capture_dims = [
 # Apply CPU thermal cap in background – sysfs writes don't need to block startup.
 threading.Thread(target=_apply_cpu_thermal_cap, daemon=True).start()
 
-# Run in still_config mode for instant capture (raw stream always available)
+# Run the live-view config.  On small sensors this is still_config (raw
+# stream permanently available → instant capture); on large sensors it's
+# the lightweight preview config and we switch modes for each capture.
 _update_splash("Starting camera...")
-picam2.configure(still_config)
+picam2.configure(_preview_running_config)
 picam2.start()
 picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
 
@@ -6759,7 +6793,7 @@ def _exit_charge_mode():
     _charge_stats_cache["timestamp"] = 0.0
     _record_activity(wake=True)
     try:
-        picam2.configure(still_config)
+        picam2.configure(_preview_running_config)
     except Exception:
         pass
     try:
@@ -7033,7 +7067,7 @@ try:
                 _prompt_for_update(update_path)
 
                 try:
-                    picam2.configure(still_config)
+                    picam2.configure(_preview_running_config)
                     picam2.start()
                     picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
                     _apply_shutter_controls()
@@ -7164,6 +7198,19 @@ try:
             # For Brenizer mode: after first shot exposure is locked, so
             # _slow_shutter_capture_us should be None (AE disabled).
             _cap_slow_us = _slow_shutter_capture_us
+            # On large sensors (IMX492) the live view runs in a lightweight
+            # preview config with no raw stream and a small main stream, so
+            # we briefly switch to still_config to get full-resolution RGB +
+            # raw for the capture, then switch back.  Slow-shutter controls
+            # must be (re)applied *after* the mode switch so they take effect
+            # on the still config's sensor mode.
+            _switched_for_capture = False
+            if USE_LIGHTWEIGHT_PREVIEW:
+                try:
+                    picam2.switch_mode(still_config)
+                    _switched_for_capture = True
+                except Exception as mode_err:
+                    print(f"[Capture] switch_mode(still) failed: {mode_err}")
             if _cap_slow_us is not None and not _bren_capturing:
                 picam2.set_controls({
                     "ExposureTime": int(_cap_slow_us),
@@ -7173,7 +7220,6 @@ try:
                 time.sleep(_cap_slow_us / 1e6 * 2 + 0.1)
             _pending_dng_path = None
             try:
-                # Instant capture - already running in still_config with raw stream
                 # Capture RAW DNG from the raw stream. If this fails, still save the JPG.
                 try:
                     picam2.capture_file(dng_path, name="raw")
@@ -7196,6 +7242,15 @@ try:
                         capture_request.release()
                     except Exception:
                         pass
+            finally:
+                # Always restore the lightweight preview config so the live
+                # view comes back, even if the capture itself raised.
+                if _switched_for_capture:
+                    try:
+                        picam2.switch_mode(_preview_running_config)
+                        picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
+                    except Exception as mode_err:
+                        print(f"[Capture] switch_mode(preview) failed: {mode_err}")
 
             if capture_error is not None:
                 print("Capture error:", capture_error)
@@ -7267,9 +7322,10 @@ try:
             if _cap_slow_us is not None and not _bren_capturing:
                 _apply_shutter_controls()
 
-        # Preview frame + overlays (use lores stream to reduce CPU load)
+        # Preview frame + overlays (use lores stream when available, else
+        # the small main stream from the lightweight preview config)
         try:
-            frame = picam2.capture_array("lores")
+            frame = picam2.capture_array(PREVIEW_STREAM_NAME)
         except Exception as e:
             print("Preview capture error:", e)
             time.sleep(0.05)
