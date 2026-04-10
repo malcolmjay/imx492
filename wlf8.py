@@ -6625,22 +6625,108 @@ still_config = picam2.create_still_configuration(
 # Producing a full-resolution RGB888 main stream every preview frame is
 # what made the IMX492 (47 MP) unusable — the ISP simply can't scale
 # 8288x5644 to RGB888 at 30 fps on a Pi 5.  For any sensor above ~20 MP
-# we therefore run a small preview config (lores-only, no raw) during
+# we therefore run a small preview config (main-only, no raw) during
 # the live view and briefly switch to `still_config` for the actual
 # capture so JPG+DNG still come out at native resolution.
 USE_LIGHTWEIGHT_PREVIEW = (FULL_W * FULL_H) > 20_000_000
 
+# Log every advertised sensor mode — on an unfamiliar sensor like the
+# IMX492 this is how you tell whether the driver actually exposes a
+# binned readout or if you're stuck on the full array.
+_all_sensor_modes = [m for m in getattr(picam2, "sensor_modes", []) if m.get("size")]
+if _all_sensor_modes:
+    print("[Camera] Advertised sensor modes:")
+    for _m in _all_sensor_modes:
+        print(
+            f"  - {_m.get('size')} @ {_m.get('fps', '?')} fps "
+            f"bit_depth={_m.get('bit_depth', '?')} "
+            f"format={_m.get('unpacked') or _m.get('format')}"
+        )
+
+def _pick_preview_sensor_mode(modes, target_size, target_fps=24.0):
+    """Pick the smallest sensor mode that can still feed `target_size`.
+
+    Sorting by pixel count ascending and taking the first mode whose
+    width/height are ≥ target size gives us the fastest-readout binned
+    mode libcamera exposes.  Slow full-array readouts are why IMX492
+    preview stutters and shows rolling-shutter skew, so forcing a binned
+    mode is the main fix for both symptoms.  If every advertised mode
+    beats the target fps we prefer them; otherwise we fall back to the
+    overall smallest mode so we at least get the fastest readout the
+    driver offers.
+    """
+    if not modes:
+        return None
+    sorted_modes = sorted(modes, key=lambda m: m["size"][0] * m["size"][1])
+    fits = [
+        m for m in sorted_modes
+        if m["size"][0] >= target_size[0] and m["size"][1] >= target_size[1]
+    ]
+    fast_fits = [m for m in fits if float(m.get("fps", 0) or 0) >= target_fps]
+    if fast_fits:
+        return fast_fits[0]
+    if fits:
+        return fits[0]
+    # Nothing covers the requested preview size — fall back to the
+    # smallest mode and let the ISP upscale (or we'll just get a tighter
+    # preview than we asked for).
+    return sorted_modes[0]
+
+_preview_sensor_mode = None
 if USE_LIGHTWEIGHT_PREVIEW:
-    _preview_running_config = picam2.create_video_configuration(
+    _preview_sensor_mode = _pick_preview_sensor_mode(_all_sensor_modes, preview_size)
+
+def _build_preview_running_config(sensor_mode):
+    """Create the live-view config, explicitly pinning the sensor mode.
+
+    picamera2 ≥0.3.17 exposes a ``sensor`` kwarg that directly selects
+    the readout mode via (output_size, bit_depth).  Older releases only
+    support hinting via ``raw={"size": ..., "format": ...}``.  We try
+    the modern path first and fall back silently if the kwarg is
+    rejected, so the script still runs on older images.
+    """
+    base_kwargs = dict(
         main={"size": preview_size, "format": "RGB888"},
         lores=None,
-        raw=None,
         controls=dict(_STILL_CONTROLS),
         buffer_count=3,
     )
+    if sensor_mode is None:
+        return picam2.create_video_configuration(raw=None, **base_kwargs)
+    mode_size = sensor_mode["size"]
+    mode_fmt = sensor_mode.get("unpacked") or sensor_mode.get("format")
+    mode_bit_depth = sensor_mode.get("bit_depth", 12)
+    try:
+        return picam2.create_video_configuration(
+            raw=None,
+            sensor={"output_size": tuple(mode_size), "bit_depth": int(mode_bit_depth)},
+            **base_kwargs,
+        )
+    except TypeError:
+        # Older picamera2 — fall back to the raw-stream hint.  This
+        # costs a small raw buffer but still pins the sensor mode, so
+        # drop buffer_count to 2 to keep memory use in check.
+        base_kwargs["buffer_count"] = 2
+        raw_hint = {"size": tuple(mode_size)}
+        if mode_fmt:
+            raw_hint["format"] = mode_fmt
+        return picam2.create_video_configuration(raw=raw_hint, **base_kwargs)
+
+if USE_LIGHTWEIGHT_PREVIEW:
+    _preview_running_config = _build_preview_running_config(_preview_sensor_mode)
     PREVIEW_STREAM_NAME = "main"
-    print(f"[Camera] Using lightweight preview config: main={preview_size} "
-          f"(full-res capture via switch_mode)")
+    if _preview_sensor_mode is not None:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} "
+            f"sensor_mode={_preview_sensor_mode['size']} "
+            f"max_fps={_preview_sensor_mode.get('fps', '?')} "
+            f"(full-res capture via switch_mode)"
+        )
+    else:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} "
+            f"(no sensor_modes advertised; relying on ISP downscale)"
+        )
 else:
     _preview_running_config = still_config
     PREVIEW_STREAM_NAME = "lores"
@@ -6659,6 +6745,13 @@ _update_splash("Starting camera...")
 picam2.configure(_preview_running_config)
 picam2.start()
 picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
+
+# On large sensors the per-frame CPU budget is tighter (bigger frames,
+# more expensive debayer, color→luma conversion, etc.), so drop the
+# focus-peaking preset to LOW by default.  The user can still raise it
+# from the settings UI if they want.
+if USE_LIGHTWEIGHT_PREVIEW:
+    FOCUS_PERF_LEVEL = 0
 
 # Pre-cache geometry for full resolution frames
 _geom_cache[(FULL_H, FULL_W)] = _compute_display_geometry(FULL_W, FULL_H)
