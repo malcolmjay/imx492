@@ -1939,16 +1939,27 @@ threading.Thread(target=_usb_sync_worker, daemon=True).start()
 def _even(val):
     return max(2, (int(val) + 1) // 2 * 2)
 
+# True when the attached sensor is monochrome (e.g. IMX585 mono).  Set to
+# its real value after the camera is initialised further down; the default
+# is True so `_mono_to_gray` keeps its fast path until the sensor identity
+# is known.  Color sensors (IMX492, IMX477, …) fall through to a proper
+# RGB→luma conversion so histogram, focus peaking and exposure assist stay
+# accurate.
+IS_MONO_SENSOR = True
+
 def _mono_to_gray(frame_rgb):
-    """Extract grayscale from monochrome sensor RGB frame efficiently.
+    """Extract grayscale from a camera frame efficiently.
 
     On a monochrome sensor R=G=B for every pixel, so extracting a single
-    channel is equivalent to cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) but
-    avoids the weighted-sum computation.
+    channel is equivalent to ``cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)``
+    but avoids the weighted-sum computation.  On a Bayer color sensor the
+    channels differ, so we do a proper RGB→luma conversion.
     """
     if frame_rgb.ndim == 2:
         return frame_rgb
-    return np.ascontiguousarray(frame_rgb[:, :, 0])
+    if IS_MONO_SENSOR:
+        return np.ascontiguousarray(frame_rgb[:, :, 0])
+    return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
 
 wifi_enabled = False
 _wifi_info_until = 0.0  # monotonic timestamp until which Wi-Fi info overlay is shown
@@ -4060,15 +4071,24 @@ def _enter_video_mode(resolution_idx=0):
         # lores preview, which the display code already flips via cv2.flip.
         # Instead, rotation is handled by embedding display-rotation metadata
         # in the MP4 container (see _start_video_recording).
+        #
+        # Explicitly suppress the raw stream: picamera2 otherwise allocates
+        # one matching the chosen sensor mode, which on large sensors (e.g.
+        # IMX492 at 47 MP) can push memory use past the Pi 5's CMA limit
+        # and prevent the camera from starting.  H.264 encoding only needs
+        # the main YUV420 stream, so there's nothing to lose by dropping
+        # the raw buffer here.
+        _video_buffer_count = 2 if (FULL_W * FULL_H) > 20_000_000 else 4
         _video_config = picam2.create_video_configuration(
             main={"size": (vid_w, vid_h), "format": "YUV420"},
             lores={"size": (_lores_w, _lores_h), "format": "RGB888"},
+            raw=None,
             controls={
                 "FrameDurationLimits": (int(1e6 / _VIDEO_FPS), int(1e6 / _VIDEO_FPS)),
                 "AeMeteringMode": 2,
                 "NoiseReductionMode": 0,
             },
-            buffer_count=4,
+            buffer_count=_video_buffer_count,
         )
         picam2.configure(_video_config)
         picam2.start()
@@ -6491,6 +6511,22 @@ _update_splash("Initializing camera...")
 from picamera2 import Picamera2
 picam2 = Picamera2()
 
+# --- Sensor identification ---------------------------------------------------
+# Known sensors the camera pipeline supports.  Each entry lists the full
+# pixel-array size (used only as a fallback when libcamera doesn't report
+# one) and whether the sensor is monochrome.  Add a row here to support a
+# new sensor without touching anything else.
+_KNOWN_SENSORS = {
+    "imx585": {"full": (3856, 2180), "mono": True},   # legacy default
+    "imx492": {"full": (8288, 5644), "mono": False},  # Sony 4/3" 47 MP
+    "imx477": {"full": (4056, 3040), "mono": False},  # Raspberry Pi HQ
+    "imx708": {"full": (4608, 2592), "mono": False},  # Pi Camera v3
+    "imx219": {"full": (3280, 2464), "mono": False},  # Pi Camera v2
+}
+
+_sensor_model = str(picam2.camera_properties.get("Model", "")).lower()
+_sensor_info = _KNOWN_SENSORS.get(_sensor_model, {"full": (3856, 2180), "mono": True})
+
 FULL_W, FULL_H = picam2.camera_properties.get("PixelArraySize", (0, 0))
 if not (FULL_W and FULL_H):
     FULL_W = FULL_H = 0
@@ -6499,9 +6535,48 @@ if not (FULL_W and FULL_H):
         if w*h > FULL_W*FULL_H:
             FULL_W, FULL_H = w, h
 if not (FULL_W and FULL_H):
-    FULL_W, FULL_H = 3856, 2180  # IMX585 monochrome fallback
+    FULL_W, FULL_H = _sensor_info["full"]
 
-print(f"[Camera] Sensor resolution: {FULL_W}x{FULL_H}")
+# Detect monochrome vs. color from the libcamera ColorFilterArrangement
+# property when it's exposed; otherwise fall back to the known-sensor
+# table.  The libcamera enum uses 4 (MONO) for monochrome sensors — any
+# other value is a Bayer pattern (RGGB/BGGR/GRBG/GBRG).
+_cfa = picam2.camera_properties.get("ColorFilterArrangement", None)
+if _cfa is None:
+    IS_MONO_SENSOR = bool(_sensor_info["mono"])
+else:
+    try:
+        IS_MONO_SENSOR = (int(_cfa) == 4)
+    except (TypeError, ValueError):
+        IS_MONO_SENSOR = bool(_sensor_info["mono"])
+
+# Pick a native raw format for the still stream.  The original code
+# hard-coded "R16" which only works for monochrome sensors (IMX585); a
+# Bayer sensor like IMX492 needs an SRGGB/SBGGR format.  We query the
+# advertised sensor modes to find the format libcamera actually exposes
+# for the full-resolution capture and only fall back when nothing matches.
+_raw_format = None
+for m in getattr(picam2, "sensor_modes", []):
+    if m.get("size") == (FULL_W, FULL_H):
+        _raw_format = m.get("unpacked") or m.get("format")
+        if _raw_format:
+            break
+if not _raw_format:
+    # Last-resort fallback based on detected mono/color
+    _raw_format = "R16" if IS_MONO_SENSOR else "SRGGB12"
+
+# Adaptive buffer count: very large sensors (e.g. IMX492 at 47 MP) blow
+# past the Pi 5's CMA allocation if we keep the legacy buffer_count=2, so
+# drop to a single still buffer once the pixel count crosses ~20 MP.  The
+# user gives up one frame of pipelining but the camera actually starts.
+_STILL_BUFFER_COUNT = 1 if (FULL_W * FULL_H) > 20_000_000 else 2
+
+print(
+    f"[Camera] Sensor: {_sensor_model or 'unknown'} "
+    f"{FULL_W}x{FULL_H} "
+    f"{'mono' if IS_MONO_SENSOR else 'color'} "
+    f"raw={_raw_format} buffers={_STILL_BUFFER_COUNT}"
+)
 
 preview_size = _choose_preview_size(FULL_W, FULL_H)
 _geom_cache = {
@@ -6533,9 +6608,9 @@ _STILL_CONTROLS = {
 still_config = picam2.create_still_configuration(
     main={"size": (FULL_W, FULL_H), "format": "RGB888"},
     lores={"size": preview_size, "format": "RGB888"},
-    raw={"size": (FULL_W, FULL_H), "format": "R16"},
+    raw={"size": (FULL_W, FULL_H), "format": _raw_format},
     controls=dict(_STILL_CONTROLS),
-    buffer_count=2,
+    buffer_count=_STILL_BUFFER_COUNT,
 )
 
 _aspect_capture_dims = [
