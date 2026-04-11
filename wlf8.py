@@ -3168,46 +3168,100 @@ def _blend_popup_to_dst(dst, popup_img, x1, y1, x2, y2, opacity, mask=None):
         dst[by1:by2, bx1:bx2] = blended
 
 
+# Scratch buffers keyed by button size so callers of _render_icon_button
+# can draw their icon content without forcing a fresh allocation every
+# frame.  The preview loop is single-threaded, so one scratch per size
+# is enough — the next button render clobbers the previous one, but by
+# then _draw_icon_to_dst has already blitted the previous result out.
+# Two scratches per size: one for the caller to draw into, one used as
+# the pre-rotated target for the final blit (so we avoid a per-frame
+# np.empty in cv2.rotate as well as an unsafe in-place rotation).
+_ICON_BTN_SCRATCH: "dict[int, np.ndarray]" = {}
+_ICON_BTN_ROT_SCRATCH: "dict[int, np.ndarray]" = {}
+# Reusable blend scratch keyed by clipped-roi shape (buttons in the
+# interior never get clipped, so this mostly contains one entry per
+# distinct button size).
+_ICON_BLEND_SCRATCH: "dict[tuple, np.ndarray]" = {}
+
+def _get_icon_scratch(size):
+    buf = _ICON_BTN_SCRATCH.get(size)
+    if buf is None:
+        buf = np.empty((size, size, 3), dtype=np.uint8)
+        _ICON_BTN_SCRATCH[size] = buf
+    return buf
+
+def _get_icon_rot_scratch(size):
+    buf = _ICON_BTN_ROT_SCRATCH.get(size)
+    if buf is None:
+        buf = np.empty((size, size, 3), dtype=np.uint8)
+        _ICON_BTN_ROT_SCRATCH[size] = buf
+    return buf
+
+
 def _render_icon_button(dst, bounds, active=False, accent_color=(180, 180, 180), inner_opacity=0.9):
-    """Render a circular icon button with clean anti-aliased edges."""
+    """Render a circular icon button with clean anti-aliased edges.
+
+    Returns (scratch_btn, cached_mask).  `scratch_btn` is a per-size
+    scratch buffer pre-filled with the cached background — the caller is
+    free to draw its icon content directly into it.  `cached_mask` is a
+    uint8 alpha in [0..255] owned by the cache and must not be mutated.
+    """
     x1, y1, x2, y2 = bounds
     size = max(1, x2 - x1)
     key = (size, bool(active), tuple(int(c) for c in accent_color), round(float(inner_opacity), 3))
     cached = _ICON_BTN_CACHE.get(key)
-    if cached is not None:
-        btn, mask = cached
-        return btn.copy(), mask.copy()
-    # Render at a higher resolution and downscale for smoother edges
-    scale = 2
-    pad = 4 * scale  # extra padding so anti-aliased fringe isn't clipped
-    render_size = size * scale + pad * 2
-    btn = np.zeros((render_size, render_size, 3), dtype=np.uint8)
-    center = (render_size // 2, render_size // 2)
-    radius = size * scale // 2 - 2 * scale
-    # Create clean anti-aliased circular mask
-    mask = np.zeros((render_size, render_size), dtype=np.uint8)
-    cv2.circle(mask, center, radius + 1 * scale, 255, -1, lineType=cv2.LINE_AA)
-    # Draw button layers – solid outline style
-    cv2.circle(btn, center, radius, (30, 30, 30), -1, cv2.LINE_AA)
-    ring_color = accent_color if active else (110, 110, 110)
-    cv2.circle(btn, center, radius, ring_color, 2 * scale, cv2.LINE_AA)
-    cv2.circle(btn, center, radius - 3 * scale, (16, 16, 16), -1, cv2.LINE_AA)
-    if inner_opacity < 1.0:
-        overlay = np.full_like(btn, 255)
-        cv2.addWeighted(overlay, 1.0 - inner_opacity, btn, inner_opacity, 0, dst=btn)
-    # Downscale for final output with clean edges
-    btn = cv2.resize(btn, (size, size), interpolation=cv2.INTER_AREA)
-    mask = cv2.resize(mask, (size, size), interpolation=cv2.INTER_AREA)
-    # Convert mask to normalized float for alpha blending
-    mask = mask.astype(np.float32) / 255.0
-    # Cache the base button so we don't rebuild every frame
-    if len(_ICON_BTN_CACHE) >= _ICON_BTN_CACHE_MAX:
-        try:
-            _ICON_BTN_CACHE.pop(next(iter(_ICON_BTN_CACHE)))
-        except Exception:
-            _ICON_BTN_CACHE.clear()
-    _ICON_BTN_CACHE[key] = (btn.copy(), mask.copy())
-    return btn, mask
+    if cached is None:
+        # Render at a higher resolution and downscale for smoother edges
+        scale = 2
+        pad = 4 * scale  # extra padding so anti-aliased fringe isn't clipped
+        render_size = size * scale + pad * 2
+        btn = np.zeros((render_size, render_size, 3), dtype=np.uint8)
+        center = (render_size // 2, render_size // 2)
+        radius = size * scale // 2 - 2 * scale
+        # Create clean anti-aliased circular mask
+        mask_hi = np.zeros((render_size, render_size), dtype=np.uint8)
+        cv2.circle(mask_hi, center, radius + 1 * scale, 255, -1, lineType=cv2.LINE_AA)
+        # Draw button layers – solid outline style
+        cv2.circle(btn, center, radius, (30, 30, 30), -1, cv2.LINE_AA)
+        ring_color = accent_color if active else (110, 110, 110)
+        cv2.circle(btn, center, radius, ring_color, 2 * scale, cv2.LINE_AA)
+        cv2.circle(btn, center, radius - 3 * scale, (16, 16, 16), -1, cv2.LINE_AA)
+        if inner_opacity < 1.0:
+            overlay = np.full_like(btn, 255)
+            cv2.addWeighted(overlay, 1.0 - inner_opacity, btn, inner_opacity, 0, dst=btn)
+        # Downscale for final output with clean edges
+        btn_small = cv2.resize(btn, (size, size), interpolation=cv2.INTER_AREA)
+        mask_small = cv2.resize(mask_hi, (size, size), interpolation=cv2.INTER_AREA)
+        # Pre-rotate the mask so _draw_icon_to_dst doesn't have to do it
+        # per frame.  Also pre-expand it to 3 channels — cv2.multiply
+        # wants matching shapes, so if we left it 2D the blit path
+        # would have to cv2.merge every frame.
+        mask_rot = cv2.rotate(mask_small, cv2.ROTATE_180)
+        mask_rot_3 = cv2.merge([mask_rot, mask_rot, mask_rot])
+        # Pre-compute the inverse (255 - mask) too — it's reused on
+        # every blit and cv2.bitwise_not is cheap but not free.
+        inv_mask_rot_3 = cv2.bitwise_not(mask_rot_3)
+        # Cache the base button so we don't rebuild every frame
+        if len(_ICON_BTN_CACHE) >= _ICON_BTN_CACHE_MAX:
+            try:
+                _ICON_BTN_CACHE.pop(next(iter(_ICON_BTN_CACHE)))
+            except Exception:
+                _ICON_BTN_CACHE.clear()
+        # Cached tuple stores the UN-rotated btn (callers draw into a
+        # scratch that's later rotated along with the icon content on
+        # blit) plus the pre-rotated, pre-expanded uint8 mask and its
+        # inverse.
+        cached = (btn_small, mask_rot_3, inv_mask_rot_3)
+        _ICON_BTN_CACHE[key] = cached
+    btn_small, mask_rot_3, inv_mask_rot_3 = cached
+    # Copy the cached background into a scratch so the caller can mutate
+    # it (draw icon content) without touching the cache entry.  One
+    # in-place memcpy is cheaper than np.copy's allocation.
+    scratch = _get_icon_scratch(size)
+    np.copyto(scratch, btn_small)
+    # Return the scratch plus a packed mask tuple so _draw_icon_to_dst
+    # can skip the cv2.merge / cv2.bitwise_not on every frame.
+    return scratch, (mask_rot_3, inv_mask_rot_3)
 
 
 def _draw_aspect_icon(canvas, label, ratio, active):
@@ -3407,6 +3461,15 @@ def _draw_iso_icon(canvas, manual_selected, popup_visible):
 
 
 def _draw_icon_to_dst(dst, img, mask, bounds):
+    """Alpha-blit a rendered icon button onto `dst`.
+
+    `img` is the un-rotated scratch buffer the caller just drew into;
+    `mask` is a (mask_rot_3, inv_mask_rot_3) tuple of pre-rotated,
+    3-channel uint8 alpha masks owned by _ICON_BTN_CACHE.  The blend is
+    done entirely in uint8 via cv2.multiply/add so we avoid the float32
+    round-trip and ~5 numpy allocations per button per frame the
+    previous implementation paid on every preview frame.
+    """
     x1, y1, x2, y2 = bounds
     # Check if a finger is currently pressing this button
     pressed = False
@@ -3416,8 +3479,17 @@ def _draw_icon_to_dst(dst, img, mask, bounds):
         px, py = pos
         if x1 <= px < x2 and y1 <= py < y2:
             pressed = True
-    img = cv2.rotate(img, cv2.ROTATE_180)
-    mask = cv2.rotate(mask, cv2.ROTATE_180)
+    # The mask is pre-rotated at cache time; rotate the drawn icon into
+    # a dedicated rotated scratch (in-place cv2.rotate isn't documented
+    # to be safe for ROTATE_180, and allocating a fresh buffer every
+    # frame defeats the purpose of the scratch caches).
+    rot_key = max(img.shape[0], img.shape[1])
+    img_rot = _ICON_BTN_ROT_SCRATCH.get(rot_key)
+    if img_rot is None or img_rot.shape != img.shape:
+        img_rot = np.empty_like(img)
+        _ICON_BTN_ROT_SCRATCH[rot_key] = img_rot
+    cv2.rotate(img, cv2.ROTATE_180, dst=img_rot)
+    img = img_rot
     clip_x1 = max(0, x1)
     clip_y1 = max(0, y1)
     clip_x2 = min(dst.shape[1], x2)
@@ -3429,21 +3501,36 @@ def _draw_icon_to_dst(dst, img, mask, bounds):
     sx2 = sx1 + (clip_x2 - clip_x1)
     sy2 = sy1 + (clip_y2 - clip_y1)
     roi = dst[clip_y1:clip_y2, clip_x1:clip_x2]
-    mask_roi = mask[sy1:sy2, sx1:sx2]
-    if mask_roi.ndim == 2:
-        alpha = mask_roi[..., None]
-    else:
-        alpha = mask_roi
-    icon_roi = img[sy1:sy2, sx1:sx2].astype(np.float32)
-    if pressed:
-        icon_roi = np.minimum(icon_roi * ICON_PRESSED_BRIGHTEN, 255.0)
-    dst_roi = roi.astype(np.float32)
+    icon_roi = img[sy1:sy2, sx1:sx2]
+    mask_rot_3, inv_mask_rot_3 = mask
     opacity = ICON_PRESSED_OPACITY if pressed else ICON_GLOBAL_OPACITY
-    # Apply icons fade for smooth minimal-mode transition
     opacity *= _icons_fade
-    alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0) * opacity
-    blended = (icon_roi * alpha + dst_roi * (1.0 - alpha)).astype(np.uint8)
-    dst[clip_y1:clip_y2, clip_x1:clip_x2] = blended
+    if opacity <= 0.01:
+        return (clip_x1, clip_y1, clip_x2, clip_y2)
+    # Hot path: fully opaque — use the pre-computed cached mask +
+    # inverse directly.  Fade animations take the scaled path.
+    if opacity >= 0.999:
+        alpha_u8 = mask_rot_3[sy1:sy2, sx1:sx2]
+        inv_alpha = inv_mask_rot_3[sy1:sy2, sx1:sx2]
+    else:
+        alpha_u8 = cv2.convertScaleAbs(
+            mask_rot_3[sy1:sy2, sx1:sx2], alpha=opacity
+        )
+        inv_alpha = cv2.bitwise_not(alpha_u8)
+    if pressed:
+        icon_roi = cv2.convertScaleAbs(icon_roi, alpha=ICON_PRESSED_BRIGHTEN)
+    # Integer blend: out = icon*a/255 + dst*(255-a)/255
+    # Use a scratch for the icon*alpha term so we don't allocate per
+    # button per frame, and do the dst*inv_alpha pass directly into
+    # `roi` to avoid a second intermediate.
+    scratch_key = icon_roi.shape
+    icon_weighted = _ICON_BLEND_SCRATCH.get(scratch_key)
+    if icon_weighted is None or icon_weighted.shape != scratch_key:
+        icon_weighted = np.empty(scratch_key, dtype=np.uint8)
+        _ICON_BLEND_SCRATCH[scratch_key] = icon_weighted
+    cv2.multiply(icon_roi, alpha_u8, dst=icon_weighted, scale=1.0 / 255.0)
+    cv2.multiply(roi, inv_alpha, dst=roi, scale=1.0 / 255.0)
+    cv2.add(roi, icon_weighted, dst=roi)
     return (clip_x1, clip_y1, clip_x2, clip_y2)
 
 
@@ -6801,22 +6888,13 @@ if USE_LIGHTWEIGHT_PREVIEW:
 # Pre-cache geometry for full resolution frames
 _geom_cache[(FULL_H, FULL_W)] = _compute_display_geometry(FULL_W, FULL_H)
 
-# Pre-warm the still_config buffers.  On the IMX492 the first switch to
-# still_config pays a one-time CMA allocation cost of ~140 MB for the
-# main stream plus ~95 MB for the raw stream.  That hit lands on the
-# user's first shutter press, making the first capture feel noticeably
-# slower than subsequent ones.  Swap to still_config and back once here
-# so the allocation happens during startup where the latency is
-# invisible; libcamera retains the buffers until the config is torn
-# down, so every subsequent switch_mode(still_config) reuses them.
-if USE_LIGHTWEIGHT_PREVIEW:
-    try:
-        _update_splash("Pre-warming capture buffers...")
-        picam2.switch_mode(still_config)
-        picam2.switch_mode(_preview_running_config)
-        picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
-    except Exception as _warmup_err:
-        print(f"[Camera] still_config pre-warm failed: {_warmup_err}")
+# NOTE: an earlier revision pre-warmed the still_config buffers at startup
+# to eliminate the one-time CMA allocation cost of the first shutter
+# press.  That hurts on the 2 GB Pi 5: libcamera pins ~235 MB (47 MP
+# main stream + raw) for the lifetime of the config, so pre-warming
+# turns a transient first-shot pause into *permanent* memory pressure
+# and kswapd thrashing that shows up as UI lag.  The first-shot delay
+# is the lesser evil here, so the pre-warm is intentionally absent.
 
 # Kick off lazy loaders so the preview appears immediately while secondary assets load.
 threading.Thread(target=_lazy_startup_loader, daemon=True).start()
