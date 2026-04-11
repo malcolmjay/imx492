@@ -731,8 +731,12 @@ def _set_cpu_low_power(enable=True):
         pass
 
 # ---- CPU thermal cap (active during normal operation) ----
-_CPU_THERMAL_CAP_KHZ = 1200000  # 1.2 GHz cap (Pi 5 max is 2.4 GHz)
-_CPU_4K_BOOST_KHZ   = 1800000  # 1.8 GHz boost for 4K video recording
+# Starting point: run at the Pi 5's full 2.4 GHz.  The original 1.2 GHz
+# cap was set for the IMX585 pipeline, where it was plenty; on the 47 MP
+# IMX492 the preview/save stages are CPU-bound and the clamp was
+# starving them.  If thermals become an issue this can be lowered again.
+_CPU_THERMAL_CAP_KHZ = 2400000  # 2.4 GHz (Pi 5 full speed)
+_CPU_4K_BOOST_KHZ   = 2400000   # same — no additional headroom to give
 
 def _apply_cpu_thermal_cap():
     """Cap CPU max frequency to reduce heat during normal operation (best-effort).
