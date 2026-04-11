@@ -6644,6 +6644,26 @@ preview_size = _choose_preview_size(FULL_W, FULL_H)
 _geom_cache = {
     (preview_size[1], preview_size[0]): _compute_display_geometry(preview_size[0], preview_size[1])
 }
+# Reusable destination buffers for the per-frame cv2.resize in the preview
+# loop.  The source shape depends on the current aspect ratio (which is
+# animated), so we end up cycling through a small set of output shapes.
+# Caching uint8 buffers keyed by (h, w, ch) avoids allocating a fresh
+# scaled buffer on every preview frame.
+_preview_resize_dst_cache: "dict[tuple, np.ndarray]" = {}
+
+def _get_preview_resize_dst(new_h, new_w, channels):
+    key = (new_h, new_w, channels)
+    buf = _preview_resize_dst_cache.get(key)
+    if buf is None:
+        # Match _geom_cache's 128 limit — aspect-ratio animation cycles
+        # through enough distinct output shapes that a smaller cap would
+        # clear mid-transition and leave us reallocating on every frame.
+        if len(_preview_resize_dst_cache) > 128:
+            _preview_resize_dst_cache.clear()
+        shape = (new_h, new_w) if channels == 1 else (new_h, new_w, channels)
+        buf = np.empty(shape, dtype=np.uint8)
+        _preview_resize_dst_cache[key] = buf
+    return buf
 preview_config = picam2.create_preview_configuration(
     main={"size": preview_size, "format": "RGB888"},
     lores=None,
@@ -6780,6 +6800,23 @@ if USE_LIGHTWEIGHT_PREVIEW:
 
 # Pre-cache geometry for full resolution frames
 _geom_cache[(FULL_H, FULL_W)] = _compute_display_geometry(FULL_W, FULL_H)
+
+# Pre-warm the still_config buffers.  On the IMX492 the first switch to
+# still_config pays a one-time CMA allocation cost of ~140 MB for the
+# main stream plus ~95 MB for the raw stream.  That hit lands on the
+# user's first shutter press, making the first capture feel noticeably
+# slower than subsequent ones.  Swap to still_config and back once here
+# so the allocation happens during startup where the latency is
+# invisible; libcamera retains the buffers until the config is torn
+# down, so every subsequent switch_mode(still_config) reuses them.
+if USE_LIGHTWEIGHT_PREVIEW:
+    try:
+        _update_splash("Pre-warming capture buffers...")
+        picam2.switch_mode(still_config)
+        picam2.switch_mode(_preview_running_config)
+        picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
+    except Exception as _warmup_err:
+        print(f"[Camera] still_config pre-warm failed: {_warmup_err}")
 
 # Kick off lazy loaders so the preview appears immediately while secondary assets load.
 threading.Thread(target=_lazy_startup_loader, daemon=True).start()
@@ -7362,6 +7399,16 @@ try:
                     except Exception as dng_err:
                         print("DNG capture error:", dng_err)
                     full_frame = capture_request.make_array("main")
+                    # Mono-sensor fastpath: collapse the 47 MP RGB888 frame
+                    # to a single channel on the capture thread so the save
+                    # queue holds ~47 MB per pending frame instead of
+                    # ~140 MB.  The save worker and downstream helpers
+                    # (_prepare_output_frame, _center_crop, film sim,
+                    # addWeighted path) are already 2D-safe.  Use
+                    # ascontiguousarray so later opencv calls don't hit a
+                    # non-contiguous slice and force a copy of their own.
+                    if IS_MONO_SENSOR and full_frame.ndim == 3:
+                        full_frame = np.ascontiguousarray(full_frame[:, :, 0])
                 finally:
                     capture_request.release()
                     capture_request = None
@@ -7503,11 +7550,24 @@ try:
                 fh, fw = view_frame.shape[:2]
         geom_key = (fh, fw)
         if geom_key not in _geom_cache:
-            if len(_geom_cache) > 16:
+            # Raised from 16 to 128: aspect-ratio animations step through
+            # ~20–40 unique source sizes in a single transition, and the
+            # old limit was clearing the cache mid-animation so no lookup
+            # ever actually hit.
+            if len(_geom_cache) > 128:
                 _geom_cache.clear()
             _geom_cache[geom_key] = _compute_display_geometry(fw, fh)
         new_w, new_h, x_off, y_off, bar_y = _geom_cache[geom_key]
-        scaled = cv2.resize(view_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # Reuse a pre-allocated destination so the cv2.resize on every
+        # preview frame doesn't churn through fresh uint8 buffers.
+        _preview_channels = 1 if view_frame.ndim == 2 else view_frame.shape[2]
+        _preview_dst = _get_preview_resize_dst(new_h, new_w, _preview_channels)
+        scaled = cv2.resize(
+            view_frame,
+            (new_w, new_h),
+            dst=_preview_dst,
+            interpolation=cv2.INTER_AREA,
+        )
         # Only build the focus-assist frame when something actually consumes
         # it — it's a full-frame resize and costs real fps on a tight budget.
         if focus_peaking_enabled or rangefinder_assist_enabled:
