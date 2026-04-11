@@ -2357,13 +2357,18 @@ _zoom_level_idx = 0
 TAP_ZOOM_BARRIER_PAD = 12
 _preview_geom = {"x": 0, "y": 0, "w": SCREEN_W, "h": SCREEN_H}
 
-def _choose_preview_size(full_w, full_h, oversample=1.5, max_long_edge=1280):
+def _choose_preview_size(full_w, full_h, oversample=1.0, max_long_edge=800):
     """Pick a preview-stream size for the live view.
 
-    The Pi 5's 4" touchscreen is 800x480, so oversampling much beyond ~1.5×
-    wastes ISP bandwidth without improving what the user sees.  The
-    previous defaults (oversample=2.0, max_long_edge=1920) requested a
-    1600-wide lores stream which made the 47 MP IMX492 pipeline unusable.
+    The Pi 5's 4" touchscreen is 800x480, so there's no benefit to
+    asking the ISP for a stream that's materially larger than the
+    display — the extra pixels just get thrown away by cv2.resize on
+    the CPU.  Earlier revisions kept `oversample=1.5, max_long_edge=1280`
+    to leave headroom for focus-peaking assist and zoom, but on the
+    47 MP IMX492 every extra pixel through the software scalers costs
+    visible performance, so drop to ~1.0x oversample and cap at 800px
+    long edge.  Still-frame captures are unaffected — they bypass this
+    config via `switch_mode(still_config)`.
     """
     if not (full_w and full_h):
         return (SCREEN_W, SCREEN_H)
