@@ -7288,21 +7288,30 @@ try:
                 time.sleep(_cap_slow_us / 1e6 * 2 + 0.1)
             _pending_dng_path = None
             try:
-                # Capture RAW DNG from the raw stream. If this fails, still save the JPG.
-                try:
-                    picam2.capture_file(dng_path, name="raw")
-                    # Flash after raw capture - signals user can move camera
-                    _black_flash_frames = _BLACK_FLASH_FRAMES
-                    cv2.imshow("Camera", _black_canvas)
-                    cv2.waitKey(1)
-                    # DNG rotation + USB sync moved to save worker to avoid
-                    # blocking the main display loop with disk I/O.
-                    _pending_dng_path = dng_path
-                except Exception as dng_err:
-                    print("DNG capture error:", dng_err)
+                # A single capture_request() yields both the full-res main
+                # stream (for the JPG) and the raw stream (for the DNG)
+                # from the SAME sensor frame.  The old flow called
+                # capture_file(name="raw") and then capture_request()
+                # separately, which forced two full-sensor readouts back
+                # to back — on the 47 MP IMX492 that doubled the shutter
+                # latency with no benefit.
                 capture_request = picam2.capture_request()
-                full_frame = capture_request.make_array("main")
-                capture_request.release()
+                try:
+                    try:
+                        capture_request.save_dng(dng_path)
+                        # Flash after raw capture - signals user can move camera
+                        _black_flash_frames = _BLACK_FLASH_FRAMES
+                        cv2.imshow("Camera", _black_canvas)
+                        cv2.waitKey(1)
+                        # DNG rotation + USB sync moved to save worker to avoid
+                        # blocking the main display loop with disk I/O.
+                        _pending_dng_path = dng_path
+                    except Exception as dng_err:
+                        print("DNG capture error:", dng_err)
+                    full_frame = capture_request.make_array("main")
+                finally:
+                    capture_request.release()
+                    capture_request = None
             except Exception as e:
                 capture_error = e
                 if capture_request is not None:
