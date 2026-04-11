@@ -6650,18 +6650,16 @@ if _all_sensor_modes:
         )
 
 if USE_LIGHTWEIGHT_PREVIEW:
-    # NB: this used to request RGB888.  On Pi 5 the ISP's YUV420 output
-    # path costs roughly half the memory bandwidth of the equivalent
-    # RGB888 at the same resolution, and cv2.cvtColor YUV→RGB is SIMD-
-    # optimised so the per-frame conversion cost is far smaller than
-    # what the ISP saves.  The rest of the pipeline still sees an RGB
-    # frame — the conversion happens in the preview loop right after
-    # capture_array.  (picamera2 requires main >= lores and always
-    # has a main stream, so the answer to "can I use lores instead?"
-    # is really "yes, by picking the cheap format for main" — which is
-    # what we do here.)
+    # Main stream format is RGB888.  An earlier revision used YUV420 to
+    # save ISP bandwidth, but picamera2 returns YUV420 as a stride-padded
+    # 2D buffer (shape `(H*3/2, stride)` where stride >= width rounded up
+    # to the ISP alignment); feeding that directly to cv2's YUV2RGB_I420
+    # converter produced a green bar on the right edge and occasionally
+    # crashed the pipeline during aspect-ratio transitions.  RGB888 at
+    # the lightweight preview size is already cheap (~3 MB/frame) so we
+    # stick with it to avoid the stride-handling complexity.
     _preview_running_config = picam2.create_video_configuration(
-        main={"size": preview_size, "format": "YUV420"},
+        main={"size": preview_size, "format": "RGB888"},
         lores=None,
         raw=None,
         controls=dict(_STILL_CONTROLS),
@@ -6669,7 +6667,7 @@ if USE_LIGHTWEIGHT_PREVIEW:
     )
     PREVIEW_STREAM_NAME = "main"
     print(
-        f"[Camera] Lightweight preview: main={preview_size} YUV420 "
+        f"[Camera] Lightweight preview: main={preview_size} RGB888 "
         f"(full-res capture via switch_mode)"
     )
 else:
@@ -7389,8 +7387,8 @@ try:
                 _apply_shutter_controls()
 
         # Preview frame + overlays.  The frame comes from either the
-        # small-sensor still_config's lores stream (RGB888) or the
-        # large-sensor lightweight config's main stream (YUV420).
+        # small-sensor still_config's lores stream or the large-sensor
+        # lightweight config's main stream (both RGB888).
         try:
             frame = picam2.capture_array(PREVIEW_STREAM_NAME)
         except Exception as e:
@@ -7407,13 +7405,7 @@ try:
             _last_meta_time = now
         meta = _meta
 
-        if frame.ndim == 2:
-            # YUV420 planar from the lightweight preview config — one
-            # SIMD-accelerated conversion per frame gives us the RGB
-            # array the rest of the pipeline expects, and we still come
-            # out ahead of asking the ISP for RGB888 directly.
-            frame = cv2.cvtColor(frame, cv2.COLOR_YUV2RGB_I420)
-        elif frame.ndim == 3 and frame.shape[2] == 4:
+        if frame.ndim == 3 and frame.shape[2] == 4:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
         # --- Slow-shutter preview simulation: digitally brighten the preview
