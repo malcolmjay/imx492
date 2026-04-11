@@ -6642,13 +6642,7 @@ USE_LIGHTWEIGHT_PREVIEW = (FULL_W * FULL_H) > 20_000_000
 
 # Log every advertised sensor mode — on an unfamiliar sensor like the
 # IMX492 this is how you tell whether the driver actually exposes a
-# binned readout or if you're stuck on the full array.  This is also
-# why we *don't* explicitly pin a sensor mode via the `sensor=` kwarg
-# any more: on some drivers (IMX492 among them) the advertised smaller
-# modes are line-skipping rather than true binning, so forcing one of
-# them bypasses libcamera's ISP alignment and produces severe banding
-# on the preview.  Letting picamera2 auto-select via the main stream
-# size is slower but produces clean pixels.
+# binned readout or if you're stuck on the full array.
 _all_sensor_modes = [m for m in getattr(picam2, "sensor_modes", []) if m.get("size")]
 if _all_sensor_modes:
     print("[Camera] Advertised sensor modes:")
@@ -6657,6 +6651,38 @@ if _all_sensor_modes:
             f"  - {_m.get('size')} @ {_m.get('fps', '?')} fps "
             f"bit_depth={_m.get('bit_depth', '?')} "
             f"format={_m.get('unpacked') or _m.get('format')}"
+        )
+
+# For the lightweight preview only: hint that libcamera should pick the
+# lowest-bit-depth mode AT the full-array size.  On a CSI-2-bandwidth-
+# limited sensor like the IMX492 this is a free-ish rolling-shutter
+# improvement: 10-bit output carries ~17% fewer bits per frame than
+# 12-bit, and since the Pi 5's CSI-2 link is the bottleneck at full
+# resolution, fewer bits means a proportionally faster row scan.
+#
+# Crucially we keep `output_size` at the full sensor mode size — earlier
+# experiments that hinted at *smaller* sizes made libcamera pick a
+# line-skipped crop mode on this driver, which bypassed ISP alignment
+# and produced severe horizontal banding.  Keeping the size unchanged
+# rules that out: only the ADC bit depth changes.
+_preview_sensor_hint = None
+if USE_LIGHTWEIGHT_PREVIEW and _all_sensor_modes:
+    _modes_by_size = {}
+    for _m in _all_sensor_modes:
+        _modes_by_size.setdefault(_m["size"], []).append(_m)
+    _largest_mode_size = max(_modes_by_size.keys(), key=lambda s: s[0] * s[1])
+    _group = _modes_by_size[_largest_mode_size]
+    _max_bit = max((m.get("bit_depth") or 0 for m in _group), default=0)
+    _min_mode = min(_group, key=lambda m: m.get("bit_depth") or 999)
+    _min_bit = _min_mode.get("bit_depth") or 0
+    if _min_bit and _min_bit < _max_bit:
+        _preview_sensor_hint = {
+            "output_size": _largest_mode_size,
+            "bit_depth": int(_min_bit),
+        }
+        print(
+            f"[Camera] Preview sensor hint: {_largest_mode_size} @ "
+            f"{_min_bit}-bit (still uses {_max_bit}-bit)"
         )
 
 if USE_LIGHTWEIGHT_PREVIEW:
@@ -6668,13 +6694,27 @@ if USE_LIGHTWEIGHT_PREVIEW:
     # crashed the pipeline during aspect-ratio transitions.  RGB888 at
     # the lightweight preview size is already cheap (~3 MB/frame) so we
     # stick with it to avoid the stride-handling complexity.
-    _preview_running_config = picam2.create_video_configuration(
+    _preview_config_kwargs = dict(
         main={"size": preview_size, "format": "RGB888"},
         lores=None,
         raw=None,
         controls=dict(_STILL_CONTROLS),
         buffer_count=3,
     )
+    if _preview_sensor_hint is not None:
+        _preview_config_kwargs["sensor"] = _preview_sensor_hint
+    try:
+        _preview_running_config = picam2.create_video_configuration(
+            **_preview_config_kwargs
+        )
+    except TypeError:
+        # Older picamera2 without the `sensor=` kwarg — drop the hint
+        # and carry on.  Preview will use whichever mode libcamera
+        # auto-selects based on the main stream size.
+        _preview_config_kwargs.pop("sensor", None)
+        _preview_running_config = picam2.create_video_configuration(
+            **_preview_config_kwargs
+        )
     PREVIEW_STREAM_NAME = "main"
     print(
         f"[Camera] Lightweight preview: main={preview_size} RGB888 "
