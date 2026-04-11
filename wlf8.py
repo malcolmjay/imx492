@@ -6530,7 +6530,13 @@ picam2 = Picamera2()
 # new sensor without touching anything else.
 _KNOWN_SENSORS = {
     "imx585": {"full": (3856, 2180), "mono": True},   # legacy default
-    "imx492": {"full": (8288, 5644), "mono": False},  # Sony 4/3" 47 MP
+    # IMX492 — the Pi libcamera ports (Will Whang / OneInchEye / etc.)
+    # are almost always the MONO variant (IMX492LLJ), so default to mono
+    # and to the 8432x5648 full-array size the driver advertises.  The
+    # runtime detection below still uses ColorFilterArrangement /
+    # PixelArraySize when libcamera exposes them, so a color-variant
+    # board will still be detected correctly; this is only the fallback.
+    "imx492": {"full": (8432, 5648), "mono": True},   # Pi IMX492 mono port
     "imx477": {"full": (4056, 3040), "mono": False},  # Raspberry Pi HQ
     "imx708": {"full": (4608, 2592), "mono": False},  # Pi Camera v3
     "imx219": {"full": (3280, 2464), "mono": False},  # Pi Camera v2
