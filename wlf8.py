@@ -6747,10 +6747,12 @@ def _get_preview_resize_dst(new_h, new_w, channels):
     key = (new_h, new_w, channels)
     buf = _preview_resize_dst_cache.get(key)
     if buf is None:
-        # Match _geom_cache's 128 limit — aspect-ratio animation cycles
-        # through enough distinct output shapes that a smaller cap would
-        # clear mid-transition and leave us reallocating on every frame.
-        if len(_preview_resize_dst_cache) > 128:
+        # Match _geom_cache's cap.  Each preview-sized uint8 buffer is
+        # roughly 1 MB, so 48 entries is ~50 MB — large enough to cover
+        # the ~20-40 unique shapes an aspect-ratio animation steps
+        # through, small enough to stay in the 2 GB Pi 5's budget next
+        # to libcamera's pinned ~235 MB of sensor buffers.
+        if len(_preview_resize_dst_cache) > 48:
             _preview_resize_dst_cache.clear()
         shape = (new_h, new_w) if channels == 1 else (new_h, new_w, channels)
         buf = np.empty(shape, dtype=np.uint8)
@@ -7637,11 +7639,12 @@ try:
                 fh, fw = view_frame.shape[:2]
         geom_key = (fh, fw)
         if geom_key not in _geom_cache:
-            # Raised from 16 to 128: aspect-ratio animations step through
+            # Raised from 16 to 48: aspect-ratio animations step through
             # ~20–40 unique source sizes in a single transition, and the
-            # old limit was clearing the cache mid-animation so no lookup
-            # ever actually hit.
-            if len(_geom_cache) > 128:
+            # old 16-entry limit was clearing the cache mid-animation so
+            # no lookup ever actually hit.  48 covers the animation range
+            # without pinning excessive memory on the 2 GB Pi 5.
+            if len(_geom_cache) > 48:
                 _geom_cache.clear()
             _geom_cache[geom_key] = _compute_display_geometry(fw, fh)
         new_w, new_h, x_off, y_off, bar_y = _geom_cache[geom_key]
@@ -8131,6 +8134,19 @@ try:
 except Exception as exc:
     print("Camera preview crash:", exc)
     traceback.print_exc()
+    # Also write the traceback to a dedicated log file next to the script
+    # so crashes are still diagnosable after the user closes the terminal.
+    try:
+        _crash_log_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "wlf8_crash.log"
+        )
+        with open(_crash_log_path, "a") as _crash_log:
+            _crash_log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            _crash_log.write(f"Camera preview crash: {exc}\n")
+            traceback.print_exc(file=_crash_log)
+            _crash_log.write("\n")
+    except Exception:
+        pass
     sys.exit(1)
 
 cv2.destroyAllWindows()
