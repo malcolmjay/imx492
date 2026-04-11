@@ -5572,6 +5572,11 @@ def _get_double_preview_overlay(target_w, target_h, aspect_ratio, film_key, zoom
     if target_w > 0 and target_h > 0:
         overlay = cv2.resize(overlay, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
+    # Mono-sensor capture path stores first_frame as 2D (Batch 2 #10).
+    # Downstream preview blend (cv2.addWeighted vs 3-channel disp) requires 3 channels.
+    if overlay.ndim == 2:
+        overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2RGB)
+
     if film_key and film_key != "none":
         overlay = apply_film_simulation_rgb(overlay, film_key)
 
@@ -7528,7 +7533,11 @@ try:
                     try:
                         _tile_thumb = cv2.resize(full_frame, (_cell_w, _cell_h),
                                                  interpolation=cv2.INTER_AREA)
-                        if _tile_thumb.ndim == 3 and _tile_thumb.shape[2] == 4:
+                        # Mono-sensor capture path delivers 2D full_frame (Batch 2 #10);
+                        # minimap buffer is 3-channel BGR so convert here.
+                        if _tile_thumb.ndim == 2:
+                            _tile_thumb = cv2.cvtColor(_tile_thumb, cv2.COLOR_GRAY2BGR)
+                        elif _tile_thumb.ndim == 3 and _tile_thumb.shape[2] == 4:
                             _tile_thumb = cv2.cvtColor(_tile_thumb, cv2.COLOR_BGRA2BGR)
                     except Exception:
                         _tile_thumb = None
