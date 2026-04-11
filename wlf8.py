@@ -6680,6 +6680,34 @@ _aspect_capture_dims = [
     _largest_ratio_crop_dims(FULL_W, FULL_H, opt["ratio"]) for opt in ASPECT_OPTIONS
 ]
 
+# If the user hasn't explicitly chosen an aspect ratio yet, default to one
+# that actually matches the sensor's native shape.  The original default
+# (index 0 = 16:9) was fine on the wide IMX585 but produced a nearly
+# full-screen preview on the IMX492, whose pixel array is closer to 4:3
+# (8288x5644 ≈ 1.47).  Cropping a 4:3-ish sensor to 16:9 on an 800x480
+# screen hides the letterbox that would otherwise show the native frame
+# shape, so pick the nearest matching option in ASPECT_OPTIONS instead.
+if "aspect_idx" not in _PERSISTED_SETTINGS and FULL_W and FULL_H:
+    _native_ratio = FULL_W / float(FULL_H)
+    if _native_ratio < 1.6:  # anything narrower than ~16:10 is non-widescreen
+        _best_idx = 0
+        _best_diff = float("inf")
+        for _idx, _opt in enumerate(ASPECT_OPTIONS):
+            _r = _opt.get("ratio", 0.0)
+            if _r <= 0:
+                continue
+            _diff = abs(_r - _native_ratio)
+            if _diff < _best_diff:
+                _best_diff = _diff
+                _best_idx = _idx
+        _aspect_idx = _best_idx
+        _aspect_ratio_current = ASPECT_OPTIONS[_aspect_idx]["ratio"]
+        _aspect_ratio_target = ASPECT_OPTIONS[_aspect_idx]["ratio"]
+        print(
+            f"[Camera] Defaulting aspect to {ASPECT_OPTIONS[_aspect_idx]['label']} "
+            f"(native {_native_ratio:.3f})"
+        )
+
 # Apply CPU thermal cap in background – sysfs writes don't need to block startup.
 threading.Thread(target=_apply_cpu_thermal_cap, daemon=True).start()
 
