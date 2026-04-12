@@ -1,0 +1,54 @@
+diff --git a/imx492.c b/imx492.c
+index a42fef6..dd04e32 100644
+--- a/imx492.c
++++ b/imx492.c
+@@ -347,6 +347,49 @@ static const struct imx492_mode supported_modes_12bit[] = {
+ 		.opb_size_v = 0x20,
+ 		.write_vsize = 0x1630,
+ 		.y_out_size = 0x1610,
++	}, {
++		/*
++		 * Experimental 20 MP vertical-crop mode.
++		 *
++		 * Reuses the wide 17:9 register table and simply asks the
++		 * sensor for fewer output rows via write_vsize / y_out_size.
++		 * Output is 8432 x 2372 = ~20.0 MP, aspect ~3.56:1.
++		 *
++		 * Purpose: test whether shrinking y_out_size proportionally
++		 * reduces CSI-2 readout time on this sensor, which is the
++		 * real bottleneck on Pi 5.  The mystery vertical-window
++		 * registers at 0x3A54 / 0x3A55 stay at the wide-mode values,
++		 * so centered-crop behaviour is not guaranteed — the output
++		 * may be top-shifted within the wide window rather than
++		 * centered on the full frame.  Validate in-field before
++		 * relying on the .top value below.
++		 *
++		 * min_VMAX = 2452 = 2372 + 80 vblank margin.
++		 * write_vsize = 0x0964 = 2404  (2372 + 32 OPB rows).
++		 * y_out_size  = 0x0944 = 2372.
++		 */
++		.width = 8432,
++		.height = 2372,
++		.min_HMAX = 1202,
++		.min_VMAX = 2452,
++		.default_HMAX = 1202,
++		.default_VMAX = 2452,
++		.VMAX_scale = 1,
++		.min_SHR = 12,
++		.integration_offset = 256,
++		.crop = {
++			.left = 0,
++			.top = 1628,
++			.width = 8240,
++			.height = 2360,
++		},
++		.reg_list = {
++			.num_of_regs = ARRAY_SIZE(imx492_wide_17_9_12bit_regs),
++			.regs = imx492_wide_17_9_12bit_regs,
++		},
++		.opb_size_v = 0x20,
++		.write_vsize = 0x0964,
++		.y_out_size = 0x0944,
+ 	},
+ };
+ 
