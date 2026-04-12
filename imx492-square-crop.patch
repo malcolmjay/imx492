@@ -1,0 +1,152 @@
+diff --git a/imx492.c b/imx492.c
+index a42fef6..36cb8d0 100644
+--- a/imx492.c
++++ b/imx492.c
+@@ -182,6 +182,23 @@ struct imx492_mode {
+ 	u8 opb_size_v;
+ 	u16 write_vsize;
+ 	u16 y_out_size;
++
++	/*
++	 * Optional HTRIMMING / VWINPOS overrides.  If htrimming_end is
++	 * non-zero this mode uses the sensor's built-in horizontal crop
++	 * primitive (HTRIMMING_EN at 0x3035, START/END at 0x3036/0x3038)
++	 * plus the vertical window position register (VWINPOS at 0x30E0)
++	 * to crop a window out of the full pixel array without needing a
++	 * vendor-specific reg table.  The CSI-2 output width register at
++	 * 0x3ED0/0x3ED1 is also overwritten with mode->width when this
++	 * path is taken.
++	 *
++	 * Existing modes leave all three fields at 0 so they fall through
++	 * to the current hardcoded-zero behaviour.
++	 */
++	u16 htrimming_start;
++	u16 htrimming_end;
++	u16 vwinpos;
+ };
+ 
+ static const struct imx492_reg imx492_startup_pre_regs[] = {
+@@ -347,6 +364,74 @@ static const struct imx492_mode supported_modes_12bit[] = {
+ 		.opb_size_v = 0x20,
+ 		.write_vsize = 0x1630,
+ 		.y_out_size = 0x1610,
++	}, {
++		/*
++		 * Experimental 5616x5616 centered square mode (~31.5 MP).
++		 *
++		 * Uses the sensor's documented HTRIMMING + VWINPOS crop
++		 * primitives instead of the vendor-supplied wide_17_9 /
++		 * four_three register-table dance.  The all_pixel register
++		 * table is taken as-is; horizontal crop is applied by the
++		 * C driver via HTRIMMING_START/END, vertical offset via
++		 * VWINPOS, and output height via y_out_size / write_vsize.
++		 *
++		 * Geometry (centered on the 8240x5628 active area):
++		 *   horizontal: start = (8240-5616)/2 = 1312
++		 *               end   = 1312 + 5616   = 6928
++		 *   vertical:   vwinpos = (5628-5616)/2 = 6
++		 *
++		 * CSI-2 output dimensions (active + OPB padding, matching
++		 * the OPB ratios of the all_pixel mode):
++		 *   width       = 5616 + 192 horizontal OPB = 5808
++		 *   y_out_size  = 5616 + 20 dummy rows      = 5636 (0x1604)
++		 *   write_vsize = 5636 + 32 vertical OPB    = 5668 (0x1624)
++		 *
++		 * HMAX is kept conservative at 1108 (same as the 4:3 mode,
++		 * known-good for a narrower output).  Frame clocks drop
++		 * from 1202*5728 = 6.88M (full) to 1108*5716 = 6.33M, a
++		 * ~8% CSI-2 readout speedup at full square resolution.
++		 * If the sensor streams cleanly with HMAX=1108 at this
++		 * width, try dropping to ~900 for a ~25% speedup — that
++		 * extrapolates linearly from the 4:3 mode's HMAX/width
++		 * ratio but has NOT been hardware-verified.
++		 *
++		 * Caveats / things to validate in-field:
++		 *   - HTRIMMING_START/END encoding (pixel vs 2-pixel vs 8
++		 *     pixel units) may require the values to be doubled or
++		 *     halved.  Symptom: output is horizontally shifted or
++		 *     stretched.
++		 *   - VWINPOS encoding similarly — if frame is vertically
++		 *     off-center, try vwinpos = 3 or vwinpos = 12.
++		 *   - 0x3ED0/0x3ED1 override may or may not actually
++		 *     re-format the CSI-2 output width; if the output is
++		 *     garbled, the all_pixel reg table's 0x3ED0 value is
++		 *     load-bearing and this approach is wrong.
++		 */
++		.width = 5808,
++		.height = 5636,
++		.min_HMAX = 1108,
++		.min_VMAX = 5716,
++		.default_HMAX = 1108,
++		.default_VMAX = 5716,
++		.VMAX_scale = 1,
++		.min_SHR = 12,
++		.integration_offset = 256,
++		.crop = {
++			.left = 1312,
++			.top = 6,
++			.width = 5616,
++			.height = 5616,
++		},
++		.reg_list = {
++			.num_of_regs = ARRAY_SIZE(imx492_all_pixel_12bit_regs),
++			.regs = imx492_all_pixel_12bit_regs,
++		},
++		.opb_size_v = 0x20,
++		.write_vsize = 0x1624,
++		.y_out_size = 0x1604,
++		.htrimming_start = 1312,
++		.htrimming_end   = 6928,
++		.vwinpos         = 6,
+ 	},
+ };
+ 
+@@ -1162,19 +1247,35 @@ static int imx492_start_streaming(struct imx492 *imx492)
+ 		return ret;
+ 	}
+ 
++	/*
++	 * Optional HTRIMMING / VWINPOS path for modes that want a
++	 * hardware crop window independent of the vendor-supplied
++	 * reg_list.  Enabled when mode->htrimming_end > 0.  Also
++	 * overrides the CSI-2 output-width register at 0x3ED0 with
++	 * mode->width so the framing matches the trimmed window.
++	 */
++	if (mode->htrimming_end > 0) {
++		ret = imx492_write_reg_2byte(imx492, 0x3ED0, mode->width);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HOPBOUT_EN, 0x01);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN, 0x00);
++	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN,
++				     mode->htrimming_end > 0 ? 0x01 : 0x00);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START,
++				     mode->htrimming_start);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END,
++				     mode->htrimming_end);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1186,7 +1287,8 @@ static int imx492_start_streaming(struct imx492 *imx492)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS,
++				     mode->vwinpos);
+ 	if (ret)
+ 		return ret;
+ 
