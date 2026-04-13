@@ -6691,6 +6691,33 @@ if not (FULL_W and FULL_H):
 if not (FULL_W and FULL_H):
     FULL_W, FULL_H = _sensor_info["full"]
 
+# IMX492 square-crop mode override.  The patched will127534 driver
+# (install-imx492-square.sh in this repo) adds a fourth entry to
+# supported_modes_12bit[] that uses the sensor's HTRIMMING + VWINPOS
+# primitives to deliver a centered 5616x5616 active window with
+# OPB/dummy-row padding out to a 5808x5636 CSI-2 frame.  The default
+# PixelArraySize query above returns the *physical* array size
+# (8240x5628 / 8432x5648) and the largest-mode fallback picks the 47 MP
+# full-array mode over the 32.7 MP square, so we explicitly prefer the
+# square mode when the patched driver exposes it.  Rationale:
+#   - ~8% CSI-2 readout speedup (lower HMAX * VMAX).
+#   - Matches the square-default framing the rest of the app assumes
+#     (aspect default, lightweight preview threshold, etc.).
+#   - Still ~31 MP — we're trading the unused left/right wings of the
+#     pixel array, not downsampling.
+# If the patched driver is absent, the mode simply won't appear in
+# sensor_modes and we fall through to the existing full-array path.
+_IMX492_SQUARE_SIZE = (5808, 5636)
+if _sensor_model == "imx492":
+    for _m in getattr(picam2, "sensor_modes", []):
+        if _m.get("size") == _IMX492_SQUARE_SIZE:
+            FULL_W, FULL_H = _IMX492_SQUARE_SIZE
+            print(
+                f"[Camera] IMX492 square-crop mode available "
+                f"({FULL_W}x{FULL_H}); overriding full-array default"
+            )
+            break
+
 # Detect monochrome vs. color from the libcamera ColorFilterArrangement
 # property when it's exposed; otherwise fall back to the known-sensor
 # table.  The libcamera enum uses 4 (MONO) for monochrome sensors — any
