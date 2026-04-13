@@ -94,6 +94,7 @@ PATCH_FILE="${WORKDIR}/imx492-square-crop.patch"
 
 cat > "${PATCH_FILE}" <<'PATCH_EOF'
 diff --git a/imx492.c b/imx492.c
+index a42fef6..a4a5908 100644
 --- a/imx492.c
 +++ b/imx492.c
 @@ -182,6 +182,23 @@ struct imx492_mode {
@@ -118,9 +119,9 @@ diff --git a/imx492.c b/imx492.c
 +	u16 htrimming_end;
 +	u16 vwinpos;
  };
-
+ 
  static const struct imx492_reg imx492_startup_pre_regs[] = {
-@@ -347,6 +364,74 @@ static const struct imx492_mode supported_modes_12bit[] = {
+@@ -347,6 +364,88 @@ static const struct imx492_mode supported_modes_12bit[] = {
  		.opb_size_v = 0x20,
  		.write_vsize = 0x1630,
  		.y_out_size = 0x1610,
@@ -208,11 +209,11 @@ diff --git a/imx492.c b/imx492.c
 +		.vwinpos         = 6,
  	},
  };
-
-@@ -1162,19 +1247,35 @@ static int imx492_start_streaming(struct imx492 *imx492)
+ 
+@@ -1162,19 +1261,35 @@ static int imx492_start_streaming(struct imx492 *imx492)
  		return ret;
  	}
-
+ 
 +	/*
 +	 * Optional HTRIMMING / VWINPOS path for modes that want a
 +	 * hardware crop window independent of the vendor-supplied
@@ -229,48 +230,50 @@ diff --git a/imx492.c b/imx492.c
  	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HOPBOUT_EN, 0x01);
  	if (ret)
  		return ret;
-
+ 
 -	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN, 0x00);
 +	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN,
 +				     mode->htrimming_end > 0 ? 0x01 : 0x00);
  	if (ret)
  		return ret;
-
+ 
 -	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START, 0x0000);
 +	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START,
 +				     mode->htrimming_start);
  	if (ret)
  		return ret;
-
+ 
 -	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END, 0x0000);
 +	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END,
 +				     mode->htrimming_end);
  	if (ret)
  		return ret;
-
-@@ -1186,7 +1287,8 @@ static int imx492_start_streaming(struct imx492 *imx492)
+ 
+@@ -1186,7 +1301,8 @@ static int imx492_start_streaming(struct imx492 *imx492)
  	if (ret)
  		return ret;
-
+ 
 -	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS, 0x0000);
 +	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS,
 +				     mode->vwinpos);
  	if (ret)
  		return ret;
-
+ 
 PATCH_EOF
 
 echo "=== Applying HTRIMMING-based square-crop patch"
 cd "${WORKDIR}"
-if git apply --check "${PATCH_FILE}" 2>/dev/null; then
-    git apply "${PATCH_FILE}"
-    echo "    Patch applied cleanly."
-elif grep -q "Experimental 5616x5616 centered square mode" imx492.c; then
+if grep -q "Experimental 5616x5616 centered square mode" imx492.c; then
     echo "    Patch already present in imx492.c, skipping."
+elif patch -p1 --dry-run --silent < "${PATCH_FILE}" 2>/dev/null; then
+    patch -p1 < "${PATCH_FILE}"
+    echo "    Patch applied cleanly."
 else
     echo "ERROR: patch does not apply cleanly and the marker comment is not" >&2
     echo "       already present.  Upstream may have moved — inspect" >&2
     echo "       ${PATCH_FILE} against ${WORKDIR}/imx492.c manually." >&2
+    echo "       Dry-run output:" >&2
+    patch -p1 --dry-run < "${PATCH_FILE}" >&2 || true
     exit 1
 fi
 
