@@ -263,18 +263,29 @@ PATCH_EOF
 
 echo "=== Applying HTRIMMING-based square-crop patch"
 cd "${WORKDIR}"
+echo "    Upstream commit: $(git rev-parse HEAD) (origin/main: $(git rev-parse origin/main))"
 if grep -q "Experimental 5616x5616 centered square mode" imx492.c; then
     echo "    Patch already present in imx492.c, skipping."
-elif patch -p1 --dry-run --silent < "${PATCH_FILE}" 2>/dev/null; then
-    patch -p1 < "${PATCH_FILE}"
-    echo "    Patch applied cleanly."
 else
-    echo "ERROR: patch does not apply cleanly and the marker comment is not" >&2
-    echo "       already present.  Upstream may have moved — inspect" >&2
-    echo "       ${PATCH_FILE} against ${WORKDIR}/imx492.c manually." >&2
-    echo "       Dry-run output:" >&2
-    patch -p1 --dry-run < "${PATCH_FILE}" >&2 || true
-    exit 1
+    # Always print the dry-run output so we can see fuzz/offset/reject
+    # details right next to the "applied" or "failed" line.  patch is
+    # preferred over git apply because it fuzzy-matches context and
+    # forgives the kind of whitespace/offset drift that git apply rejects
+    # as "corrupt".
+    echo "    --- patch -p1 --dry-run --fuzz=3 output ---"
+    if patch -p1 --dry-run --fuzz=3 < "${PATCH_FILE}"; then
+        echo "    --- applying for real ---"
+        patch -p1 --fuzz=3 < "${PATCH_FILE}"
+        echo "    Patch applied cleanly."
+    else
+        echo "ERROR: patch does not apply to imx492.c even with --fuzz=3." >&2
+        echo "       Upstream commit: $(git rev-parse HEAD)" >&2
+        echo "       Patch file: ${PATCH_FILE}" >&2
+        echo "       Target file: ${WORKDIR}/imx492.c" >&2
+        echo "       Dump .rej files (if any):" >&2
+        find "${WORKDIR}" -name '*.rej' -exec echo '--- {} ---' \; -exec cat {} \; >&2 || true
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
