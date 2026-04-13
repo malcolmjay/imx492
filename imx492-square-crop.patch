@@ -52,14 +52,28 @@ index a42fef6..36cb8d0 100644
 +		 *   y_out_size  = 5616 + 20 dummy rows      = 5636 (0x1604)
 +		 *   write_vsize = 5636 + 32 vertical OPB    = 5668 (0x1624)
 +		 *
-+		 * HMAX is kept conservative at 1108 (same as the 4:3 mode,
-+		 * known-good for a narrower output).  Frame clocks drop
-+		 * from 1202*5728 = 6.88M (full) to 1108*5716 = 6.33M, a
-+		 * ~8% CSI-2 readout speedup at full square resolution.
-+		 * If the sensor streams cleanly with HMAX=1108 at this
-+		 * width, try dropping to ~900 for a ~25% speedup — that
-+		 * extrapolates linearly from the 4:3 mode's HMAX/width
-+		 * ratio but has NOT been hardware-verified.
++		 * HMAX and VMAX MUST match the full-array mode's timing
++		 * (1202 / 5728).  This mode reuses imx492_all_pixel_12bit_regs,
++		 * which programs the sensor's pixel scanner for a full
++		 * 8432-wide readout — HTRIMMING only gates the output
++		 * formatter downstream, it doesn't shorten the physical
++		 * line-scan time.  A smaller HMAX (like the 4:3 mode's 1108)
++		 * truncates each line before the scanner finishes and
++		 * desyncs CSI-2 framing, producing per-line horizontal-band
++		 * garbage instead of a real image.  Lesson learned the
++		 * hard way during initial bring-up.
++		 *
++		 * The speedup this mode was originally chasing (lower frame
++		 * clock via reduced HMAX/VMAX) is therefore not available
++		 * with the all_pixel reg table.  The remaining wins are:
++		 *   (a) square framing in hardware, so the app doesn't have
++		 *       to crop a 2:3 frame to 1:1 every capture;
++		 *   (b) ~8% less memory bandwidth through the ISP because
++		 *       we're transporting 5808x5636 instead of 8432x5648.
++		 * Revisiting the speedup would require a dedicated reg
++		 * table that reconfigures the pixel scanner to actually
++		 * read fewer columns — see imx492_four_three_12bit_regs
++		 * for the shape that work would take.
 +		 *
 +		 * Caveats / things to validate in-field:
 +		 *   - HTRIMMING_START/END encoding (pixel vs 2-pixel vs 8
@@ -75,10 +89,10 @@ index a42fef6..36cb8d0 100644
 +		 */
 +		.width = 5808,
 +		.height = 5636,
-+		.min_HMAX = 1108,
-+		.min_VMAX = 5716,
-+		.default_HMAX = 1108,
-+		.default_VMAX = 5716,
++		.min_HMAX = 1202,
++		.min_VMAX = 5728,
++		.default_HMAX = 1202,
++		.default_VMAX = 5728,
 +		.VMAX_scale = 1,
 +		.min_SHR = 12,
 +		.integration_offset = 256,
