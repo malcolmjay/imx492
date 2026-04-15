@@ -6691,32 +6691,38 @@ if not (FULL_W and FULL_H):
 if not (FULL_W and FULL_H):
     FULL_W, FULL_H = _sensor_info["full"]
 
-# IMX492 square-crop mode override.  The patched will127534 driver
-# (install-imx492-square.sh in this repo) adds a fourth entry to
-# supported_modes_12bit[] that uses the sensor's HTRIMMING + VWINPOS
-# primitives to deliver a centered 5616x5616 active window with
-# OPB/dummy-row padding out to a 5808x5636 CSI-2 frame.  The default
-# PixelArraySize query above returns the *physical* array size
-# (8240x5628 / 8432x5648) and the largest-mode fallback picks the 47 MP
-# full-array mode over the 32.7 MP square, so we explicitly prefer the
-# square mode when the patched driver exposes it.  Rationale:
-#   - ~8% CSI-2 readout speedup (lower HMAX * VMAX).
-#   - Matches the square-default framing the rest of the app assumes
-#     (aspect default, lightweight preview threshold, etc.).
-#   - Still ~31 MP — we're trading the unused left/right wings of the
-#     pixel array, not downsampling.
-# If the patched driver is absent, the mode simply won't appear in
-# sensor_modes and we fall through to the existing full-array path.
-_IMX492_SQUARE_SIZE = (5808, 5636)
+# Main-stream capture size.  For most sensors this is identical to the
+# physical pixel array, but on the IMX492 we ask libcamera/PiSP to
+# downsample-and-center-crop the ISP output to a 16 MP square while the
+# raw stream stays at full sensor resolution.  Rationale:
+#
+#   - The sensor is ~10 fps CSI-2-bound in the 12-bit full mode; no
+#     driver-side crop hack can change that.  What we *can* change is
+#     everything downstream of the ISP: a 4000x4000 RGB888 main buffer is
+#     ~48 MB vs ~140 MB for the full 8240x5628, so every cv2 call in the
+#     capture / save / film-sim / overlay path gets ~3x cheaper, and we
+#     fit two still-config buffers in CMA instead of one (real capture
+#     pipelining back).
+#   - PiSP handles the crop-and-downsample in hardware during the raw→RGB
+#     conversion, using the same known-good sensor mode (all_pixel_12bit)
+#     that the ISP tuning file imx492_mono.json was written against, so
+#     the result is ISP-clean with no banding / tuning mismatch.
+#   - Square is also the app's default framing, so the default capture
+#     needs no post-crop at all.  Non-square aspect ratios still work via
+#     the existing _largest_ratio_crop_dims center-crop path; they just
+#     max out at sub-square sizes (e.g. 16:9 = 4000x2250 = 9 MP).
+#   - DNG archival is preserved — the raw stream stays at (FULL_W,FULL_H)
+#     so capture_request.save_dng() still writes a full-resolution DNG.
+#
+# An earlier revision on this branch tried to achieve the same square
+# framing via a custom 5616x5616 sensor mode in the will127534 driver
+# using HTRIMMING + VWINPOS.  That approach never produced clean pixels
+# (see the install-imx492-square.sh history for the full debugging log)
+# and has been superseded by this ISP-side path.
 if _sensor_model == "imx492":
-    for _m in getattr(picam2, "sensor_modes", []):
-        if _m.get("size") == _IMX492_SQUARE_SIZE:
-            FULL_W, FULL_H = _IMX492_SQUARE_SIZE
-            print(
-                f"[Camera] IMX492 square-crop mode available "
-                f"({FULL_W}x{FULL_H}); overriding full-array default"
-            )
-            break
+    CAPTURE_W, CAPTURE_H = 4000, 4000
+else:
+    CAPTURE_W, CAPTURE_H = FULL_W, FULL_H
 
 # Detect monochrome vs. color from the libcamera ColorFilterArrangement
 # property when it's exposed; otherwise fall back to the known-sensor
@@ -6746,15 +6752,19 @@ if not _raw_format:
     # Last-resort fallback based on detected mono/color
     _raw_format = "R16" if IS_MONO_SENSOR else "SRGGB12"
 
-# Adaptive buffer count: very large sensors (e.g. IMX492 at 47 MP) blow
-# past the Pi 5's CMA allocation if we keep the legacy buffer_count=2, so
-# drop to a single still buffer once the pixel count crosses ~20 MP.  The
-# user gives up one frame of pipelining but the camera actually starts.
-_STILL_BUFFER_COUNT = 1 if (FULL_W * FULL_H) > 20_000_000 else 2
+# Adaptive buffer count: very large *capture* main streams (e.g. the
+# IMX492 at a hypothetical 47 MP RGB888) blow past the Pi 5's CMA
+# allocation if we keep the legacy buffer_count=2, so drop to a single
+# still buffer once the main-stream pixel count crosses ~20 MP.  Note
+# that this keys off CAPTURE (not FULL) dims on purpose: on IMX492 the
+# ISP downsamples to 4000x4000 so we get buffer_count=2 (pipelining)
+# back even though the physical sensor is 47 MP.  The raw stream is
+# still full-res but is much cheaper per-buffer than RGB888 main.
+_STILL_BUFFER_COUNT = 1 if (CAPTURE_W * CAPTURE_H) > 20_000_000 else 2
 
 print(
     f"[Camera] Sensor: {_sensor_model or 'unknown'} "
-    f"{FULL_W}x{FULL_H} "
+    f"full={FULL_W}x{FULL_H} capture={CAPTURE_W}x{CAPTURE_H} "
     f"{'mono' if IS_MONO_SENSOR else 'color'} "
     f"raw={_raw_format} buffers={_STILL_BUFFER_COUNT}"
 )
@@ -6809,7 +6819,7 @@ _STILL_CONTROLS = {
 
 
 still_config = picam2.create_still_configuration(
-    main={"size": (FULL_W, FULL_H), "format": "RGB888"},
+    main={"size": (CAPTURE_W, CAPTURE_H), "format": "RGB888"},
     lores=None,
     raw={"size": (FULL_W, FULL_H), "format": _raw_format},
     controls=dict(_STILL_CONTROLS),
@@ -6870,7 +6880,7 @@ else:
     PREVIEW_STREAM_NAME = "lores"
 
 _aspect_capture_dims = [
-    _largest_ratio_crop_dims(FULL_W, FULL_H, opt["ratio"]) for opt in ASPECT_OPTIONS
+    _largest_ratio_crop_dims(CAPTURE_W, CAPTURE_H, opt["ratio"]) for opt in ASPECT_OPTIONS
 ]
 
 # If the user hasn't explicitly chosen an aspect ratio yet, default to one
@@ -6880,8 +6890,8 @@ _aspect_capture_dims = [
 # (8288x5644 ≈ 1.47).  Cropping a 4:3-ish sensor to 16:9 on an 800x480
 # screen hides the letterbox that would otherwise show the native frame
 # shape, so pick the nearest matching option in ASPECT_OPTIONS instead.
-if "aspect_idx" not in _PERSISTED_SETTINGS and FULL_W and FULL_H:
-    _native_ratio = FULL_W / float(FULL_H)
+if "aspect_idx" not in _PERSISTED_SETTINGS and CAPTURE_W and CAPTURE_H:
+    _native_ratio = CAPTURE_W / float(CAPTURE_H)
     if _native_ratio < 1.6:  # anything narrower than ~16:10 is non-widescreen
         _best_idx = 0
         _best_diff = float("inf")
@@ -6919,8 +6929,9 @@ picam2.set_controls({"FrameDurationLimits": _PREVIEW_FRAME_LIMITS})
 if USE_LIGHTWEIGHT_PREVIEW:
     FOCUS_PERF_LEVEL = 0
 
-# Pre-cache geometry for full resolution frames
-_geom_cache[(FULL_H, FULL_W)] = _compute_display_geometry(FULL_W, FULL_H)
+# Pre-cache geometry for the main capture frame size.  On IMX492 this
+# is the 4000x4000 ISP-downsampled square, not the full sensor array.
+_geom_cache[(CAPTURE_H, CAPTURE_W)] = _compute_display_geometry(CAPTURE_W, CAPTURE_H)
 
 # NOTE: an earlier revision pre-warmed the still_config buffers at startup
 # to eliminate the one-time CMA allocation cost of the first shutter
