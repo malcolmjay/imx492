@@ -6845,18 +6845,24 @@ if _all_sensor_modes:
             f"format={_m.get('unpacked') or _m.get('format')}"
         )
 
-# Find a half-res sensor mode for preview.  On the IMX492 the driver
-# exposes a ~4096x2796 mode that reads out ~4x fewer pixels over CSI-2
-# than the full 8432x5648 array.  Using it for preview means the ISP
-# only downscales ~11 MP instead of ~47 MP to reach 800x548, cutting
-# both CSI-2 bandwidth and ISP work dramatically.
+# Find a half-res 12-bit sensor mode for preview.  On the IMX492 the
+# driver exposes a ~4096x2796 mode at 12-bit that reads ~4x fewer pixels
+# over CSI-2 than the full array.  The bit_depth=12 filter is critical:
+# 10-bit variants of the same resolution line-skip and produce banding.
+# The sensor= kwarg must also specify bit_depth so picamera2 doesn't
+# fall back to a 10-bit mode that happens to match the output_size.
 _preview_sensor_mode = None
+_preview_sensor_bit_depth = None
 if USE_LIGHTWEIGHT_PREVIEW and _all_sensor_modes:
     _full_pixels = FULL_W * FULL_H
     for _m in sorted(_all_sensor_modes, key=lambda m: m["size"][0] * m["size"][1]):
         _mw, _mh = _m["size"]
-        if _mw * _mh < _full_pixels * 0.9 and _mw >= preview_size[0] and _mh >= preview_size[1]:
+        _mbd = _m.get("bit_depth", 0)
+        if (_mw * _mh < _full_pixels * 0.9
+                and _mw >= preview_size[0] and _mh >= preview_size[1]
+                and _mbd >= 12):
             _preview_sensor_mode = (_mw, _mh)
+            _preview_sensor_bit_depth = _mbd
             break
 
 if USE_LIGHTWEIGHT_PREVIEW:
@@ -6868,13 +6874,17 @@ if USE_LIGHTWEIGHT_PREVIEW:
         buffer_count=3,
     )
     if _preview_sensor_mode:
-        _preview_cfg_kwargs["sensor"] = {"output_size": _preview_sensor_mode}
+        _preview_cfg_kwargs["sensor"] = {
+            "output_size": _preview_sensor_mode,
+            "bit_depth": _preview_sensor_bit_depth,
+        }
     _preview_running_config = picam2.create_video_configuration(**_preview_cfg_kwargs)
     PREVIEW_STREAM_NAME = "main"
     if _preview_sensor_mode:
         print(
             f"[Camera] Lightweight preview: main={preview_size} RGB888 "
-            f"sensor_mode={_preview_sensor_mode[0]}x{_preview_sensor_mode[1]} "
+            f"sensor_mode={_preview_sensor_mode[0]}x{_preview_sensor_mode[1]}"
+            f"@{_preview_sensor_bit_depth}bit "
             f"(full-res capture via switch_mode)"
         )
     else:
