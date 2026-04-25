@@ -6835,15 +6835,6 @@ still_config = picam2.create_still_configuration(
 # capture so JPG+DNG still come out at native resolution.
 USE_LIGHTWEIGHT_PREVIEW = (FULL_W * FULL_H) > 20_000_000
 
-# Log every advertised sensor mode — on an unfamiliar sensor like the
-# IMX492 this is how you tell whether the driver actually exposes a
-# binned readout or if you're stuck on the full array.  This is also
-# why we *don't* explicitly pin a sensor mode via the `sensor=` kwarg
-# any more: on some drivers (IMX492 among them) the advertised smaller
-# modes are line-skipping rather than true binning, so forcing one of
-# them bypasses libcamera's ISP alignment and produces severe banding
-# on the preview.  Letting picamera2 auto-select via the main stream
-# size is slower but produces clean pixels.
 _all_sensor_modes = [m for m in getattr(picam2, "sensor_modes", []) if m.get("size")]
 if _all_sensor_modes:
     print("[Camera] Advertised sensor modes:")
@@ -6854,27 +6845,43 @@ if _all_sensor_modes:
             f"format={_m.get('unpacked') or _m.get('format')}"
         )
 
+# Find a half-res sensor mode for preview.  On the IMX492 the driver
+# exposes a ~4096x2796 mode that reads out ~4x fewer pixels over CSI-2
+# than the full 8432x5648 array.  Using it for preview means the ISP
+# only downscales ~11 MP instead of ~47 MP to reach 800x548, cutting
+# both CSI-2 bandwidth and ISP work dramatically.
+_preview_sensor_mode = None
+if USE_LIGHTWEIGHT_PREVIEW and _all_sensor_modes:
+    _full_pixels = FULL_W * FULL_H
+    for _m in sorted(_all_sensor_modes, key=lambda m: m["size"][0] * m["size"][1]):
+        _mw, _mh = _m["size"]
+        if _mw * _mh < _full_pixels * 0.9 and _mw >= preview_size[0] and _mh >= preview_size[1]:
+            _preview_sensor_mode = (_mw, _mh)
+            break
+
 if USE_LIGHTWEIGHT_PREVIEW:
-    # Main stream format is RGB888.  An earlier revision used YUV420 to
-    # save ISP bandwidth, but picamera2 returns YUV420 as a stride-padded
-    # 2D buffer (shape `(H*3/2, stride)` where stride >= width rounded up
-    # to the ISP alignment); feeding that directly to cv2's YUV2RGB_I420
-    # converter produced a green bar on the right edge and occasionally
-    # crashed the pipeline during aspect-ratio transitions.  RGB888 at
-    # the lightweight preview size is already cheap (~3 MB/frame) so we
-    # stick with it to avoid the stride-handling complexity.
-    _preview_running_config = picam2.create_video_configuration(
+    _preview_cfg_kwargs = dict(
         main={"size": preview_size, "format": "RGB888"},
         lores=None,
         raw=None,
         controls=dict(_STILL_CONTROLS),
         buffer_count=3,
     )
+    if _preview_sensor_mode:
+        _preview_cfg_kwargs["sensor"] = {"output_size": _preview_sensor_mode}
+    _preview_running_config = picam2.create_video_configuration(**_preview_cfg_kwargs)
     PREVIEW_STREAM_NAME = "main"
-    print(
-        f"[Camera] Lightweight preview: main={preview_size} RGB888 "
-        f"(full-res capture via switch_mode)"
-    )
+    if _preview_sensor_mode:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
+            f"sensor_mode={_preview_sensor_mode[0]}x{_preview_sensor_mode[1]} "
+            f"(full-res capture via switch_mode)"
+        )
+    else:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
+            f"(full-res capture via switch_mode)"
+        )
 else:
     _preview_running_config = still_config
     PREVIEW_STREAM_NAME = "lores"
