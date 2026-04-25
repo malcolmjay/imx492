@@ -6868,10 +6868,6 @@ if USE_LIGHTWEIGHT_PREVIEW and _all_sensor_modes:
 if USE_LIGHTWEIGHT_PREVIEW:
     _preview_controls = dict(_STILL_CONTROLS)
     if _preview_sensor_mode:
-        # The half-res mode line-skips (not true binning).  The ISP's
-        # noise reduction masks the resulting row-pattern; without it
-        # the preview shows horizontal banding.  NR is fine at 800x548
-        # — only stills need it off for detail preservation.
         _preview_controls.pop("NoiseReductionMode", None)
     _preview_cfg_kwargs = dict(
         main={"size": preview_size, "format": "RGB888"},
@@ -6885,7 +6881,7 @@ if USE_LIGHTWEIGHT_PREVIEW:
             "output_size": _preview_sensor_mode,
             "bit_depth": _preview_sensor_bit_depth,
         }
-    _preview_running_config = picam2.create_video_configuration(**_preview_cfg_kwargs)
+    _preview_running_config = picam2.create_preview_configuration(**_preview_cfg_kwargs)
     PREVIEW_STREAM_NAME = "main"
     if _preview_sensor_mode:
         print(
