@@ -6869,28 +6869,31 @@ if USE_LIGHTWEIGHT_PREVIEW:
     _preview_cfg_kwargs = dict(
         main={"size": preview_size, "format": "RGB888"},
         lores=None,
-        raw=None,
         controls=dict(_STILL_CONTROLS),
         buffer_count=3,
     )
-    # Half-res sensor mode for preview is disabled — the 4096x2796 mode
-    # runs clean under libcamera-hello but bands when driven through
-    # picamera2's video configuration, likely due to ISP tuning mismatch
-    # (imx492_mono.json only calibrated for the full-array readout).
-    # Leaving the detection logic in place for future re-enablement once
-    # the tuning file covers the half-res mode.
-    #
-    # if _preview_sensor_mode:
-    #     _preview_cfg_kwargs["sensor"] = {
-    #         "output_size": _preview_sensor_mode,
-    #         "bit_depth": _preview_sensor_bit_depth,
-    #     }
+    if _preview_sensor_mode:
+        _preview_cfg_kwargs["sensor"] = {
+            "output_size": _preview_sensor_mode,
+            "bit_depth": _preview_sensor_bit_depth,
+        }
+        _preview_cfg_kwargs["raw"] = None
+    else:
+        _preview_cfg_kwargs["raw"] = None
     _preview_running_config = picam2.create_video_configuration(**_preview_cfg_kwargs)
     PREVIEW_STREAM_NAME = "main"
-    print(
-        f"[Camera] Lightweight preview: main={preview_size} RGB888 "
-        f"(full-res capture via switch_mode)"
-    )
+    if _preview_sensor_mode:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
+            f"sensor_mode={_preview_sensor_mode[0]}x{_preview_sensor_mode[1]}"
+            f"@{_preview_sensor_bit_depth}bit "
+            f"(full-res capture via switch_mode)"
+        )
+    else:
+        print(
+            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
+            f"(full-res capture via switch_mode)"
+        )
 else:
     _preview_running_config = still_config
     PREVIEW_STREAM_NAME = "lores"
