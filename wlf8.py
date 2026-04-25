@@ -6866,35 +6866,18 @@ if USE_LIGHTWEIGHT_PREVIEW and _all_sensor_modes:
             break
 
 if USE_LIGHTWEIGHT_PREVIEW:
-    _preview_controls = dict(_STILL_CONTROLS)
-    if _preview_sensor_mode:
-        _preview_controls.pop("NoiseReductionMode", None)
-    _preview_cfg_kwargs = dict(
+    _preview_running_config = picam2.create_video_configuration(
         main={"size": preview_size, "format": "RGB888"},
         lores=None,
         raw=None,
-        controls=_preview_controls,
+        controls=dict(_STILL_CONTROLS),
         buffer_count=3,
     )
-    if _preview_sensor_mode:
-        _preview_cfg_kwargs["sensor"] = {
-            "output_size": _preview_sensor_mode,
-            "bit_depth": _preview_sensor_bit_depth,
-        }
-    _preview_running_config = picam2.create_preview_configuration(**_preview_cfg_kwargs)
     PREVIEW_STREAM_NAME = "main"
-    if _preview_sensor_mode:
-        print(
-            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
-            f"sensor_mode={_preview_sensor_mode[0]}x{_preview_sensor_mode[1]}"
-            f"@{_preview_sensor_bit_depth}bit "
-            f"(full-res capture via switch_mode)"
-        )
-    else:
-        print(
-            f"[Camera] Lightweight preview: main={preview_size} RGB888 "
-            f"(full-res capture via switch_mode)"
-        )
+    print(
+        f"[Camera] Lightweight preview: main={preview_size} RGB888 "
+        f"(full-res capture via switch_mode)"
+    )
 else:
     _preview_running_config = still_config
     PREVIEW_STREAM_NAME = "lores"
@@ -7649,12 +7632,14 @@ try:
         # Preview frame + overlays.  The frame comes from either the
         # small-sensor still_config's lores stream or the large-sensor
         # lightweight config's main stream (both RGB888).
+        _t0 = time.perf_counter()
         try:
             frame = picam2.capture_array(PREVIEW_STREAM_NAME)
         except Exception as e:
             print("Preview capture error:", e)
             time.sleep(0.05)
             continue
+        _t_capture = time.perf_counter()
         # Metadata capture can be expensive; refresh at a low rate for UI.
         now = time.time()
         if now - _last_meta_time >= _META_REFRESH_S:
@@ -8187,6 +8172,23 @@ try:
         # Decrement black-flash frames after presenting a frame
         if _black_flash_frames > 0:
             _black_flash_frames -= 1
+
+        _t_end = time.perf_counter()
+        # Print frame timing every 60 frames (~3-6s depending on fps)
+        if not hasattr(_pace_frame, '_dbg_n'):
+            _pace_frame._dbg_n = 0
+            _pace_frame._dbg_cap = 0.0
+            _pace_frame._dbg_proc = 0.0
+        _pace_frame._dbg_n += 1
+        _pace_frame._dbg_cap += (_t_capture - _t0)
+        _pace_frame._dbg_proc += (_t_end - _t_capture)
+        if _pace_frame._dbg_n >= 60:
+            _avg_cap = _pace_frame._dbg_cap / _pace_frame._dbg_n * 1000
+            _avg_proc = _pace_frame._dbg_proc / _pace_frame._dbg_n * 1000
+            print(f"[Perf] capture_array={_avg_cap:.1f}ms  processing={_avg_proc:.1f}ms  total={_avg_cap+_avg_proc:.1f}ms  ({1000/(_avg_cap+_avg_proc):.0f} fps)")
+            _pace_frame._dbg_n = 0
+            _pace_frame._dbg_cap = 0.0
+            _pace_frame._dbg_proc = 0.0
 
         _pace_frame()
 except Exception as exc:
