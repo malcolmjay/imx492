@@ -99,10 +99,12 @@ def main():
             f"fmt={m.get('unpacked') or m.get('format')}"
         )
 
-    # ── Preview config ───────────────────────────────────────────────
-    preview_config = picam2.create_video_configuration(
+    # ── Preview config (test 1 approach) ────────────────────────────
+    # Uses sensor= kwarg to select the half-res mode without allocating
+    # a raw stream buffer.
+    preview_config = picam2.create_preview_configuration(
         main={"size": (SCREEN_W, SCREEN_H), "format": "RGB888"},
-        raw={"size": PREVIEW_MODE_SIZE, "format": PREVIEW_RAW_FMT},
+        sensor={"output_size": PREVIEW_MODE_SIZE, "bit_depth": 12},
         buffer_count=4,
     )
     print(f"[Camera] Preview config: {preview_config}")
