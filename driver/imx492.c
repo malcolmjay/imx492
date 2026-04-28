@@ -390,11 +390,17 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.VMAX_scale = 2,
 		.min_SHR = 5,
 		.integration_offset = 551,
+		/*
+		 * Crop in native (unbinned) pixel coordinates.
+		 * The 2×2 binning reads the full sensor array; the
+		 * IMX294 mode_00 crop of (40,24)/3704×2778 in binned
+		 * pixels maps to (80,48)/7408×5556 in native pixels.
+		 */
 		.crop = {
-			.left = 40,
-			.top = 24,
-			.width = 3704,
-			.height = 2778,
+			.left = 80,
+			.top = 48,
+			.width = 7408,
+			.height = 5556,
 		},
 		.reg_list = {
 			.num_of_regs = ARRAY_SIZE(imx492_binned_12bit_regs),
