@@ -381,7 +381,7 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		 * VMAX_scale=2 because each VMAX tick covers two sensor
 		 * rows in binned readout.
 		 */
-		.width = 4168,
+		.width = 4120,
 		.height = 2840,
 		.min_HMAX = 1730,
 		.min_VMAX = 1444,
@@ -392,8 +392,8 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.integration_offset = 551,
 		/*
 		 * Crop in native (unbinned) pixel coordinates.
-		 * HTRIMMING captures the full binned frame (48 to 4216),
-		 * covering the entire 8240-pixel sensor width.
+		 * HTRIMMING captures the full active binned area
+		 * (48 to 4168), avoiding OB columns on both edges.
 		 */
 		.crop = {
 			.left = 0,
@@ -409,7 +409,7 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.write_vsize = 0x0B18,
 		.y_out_size = 0x0B08,
 		.htrimming_start = 0x0030,
-		.htrimming_end = 0x1078,
+		.htrimming_end = 0x1048,
 		.is_binned = 1,
 	}, {
 		/*
