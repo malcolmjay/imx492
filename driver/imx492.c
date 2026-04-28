@@ -1249,6 +1249,8 @@ static int imx492_set_pad_format(struct v4l2_subdev *sd,
 			framefmt = imx492_subdev_state_get_format(sd, sd_state,
 								fmt->pad);
 			*framefmt = fmt->format;
+			*imx492_subdev_state_get_crop(&imx492->sd, sd_state,
+						      fmt->pad) = mode->crop;
 		} else if (imx492->mode != mode) {
 			imx492->mode = mode;
 			imx492->fmt_code = fmt->format.code;
