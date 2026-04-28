@@ -1314,11 +1314,14 @@ static int imx492_start_streaming(struct imx492 *imx492)
 	/*
 	 * Optional HTRIMMING / VWINPOS path for modes that want a
 	 * hardware crop window independent of the vendor-supplied
-	 * reg_list.  Enabled when mode->htrimming_end > 0.  Also
-	 * overrides the CSI-2 output-width register at 0x3ED0 with
-	 * mode->width so the framing matches the trimmed window.
+	 * reg_list.  Enabled when mode->htrimming_end > 0.
+	 *
+	 * Override the CSI-2 output-width register (0x3ED0) only for
+	 * unbinned HTRIMMING modes.  The binned mode determines its
+	 * own CSI-2 line width from the HTRIMMING window (matching
+	 * the IMX294 driver which never writes 0x3ED0).
 	 */
-	if (mode->htrimming_end > 0) {
+	if (mode->htrimming_end > 0 && !mode->is_binned) {
 		ret = imx492_write_reg_2byte(imx492, 0x3ED0, mode->width);
 		if (ret)
 			return ret;
