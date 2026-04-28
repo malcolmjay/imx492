@@ -381,7 +381,7 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		 * VMAX_scale=2 because each VMAX tick covers two sensor
 		 * rows in binned readout.
 		 */
-		.width = 3792,
+		.width = 4168,
 		.height = 2840,
 		.min_HMAX = 1730,
 		.min_VMAX = 1444,
@@ -392,14 +392,13 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.integration_offset = 551,
 		/*
 		 * Crop in native (unbinned) pixel coordinates.
-		 * The 2×2 binning reads the full sensor array; the
-		 * IMX294 mode_00 crop of (40,24)/3704×2778 in binned
-		 * pixels maps to (80,48)/7408×5556 in native pixels.
+		 * HTRIMMING captures the full binned frame (48 to 4216),
+		 * covering the entire 8240-pixel sensor width.
 		 */
 		.crop = {
-			.left = 80,
+			.left = 0,
 			.top = 48,
-			.width = 7408,
+			.width = 8240,
 			.height = 5556,
 		},
 		.reg_list = {
@@ -410,7 +409,7 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.write_vsize = 0x0B18,
 		.y_out_size = 0x0B08,
 		.htrimming_start = 0x0030,
-		.htrimming_end = 0x0F00,
+		.htrimming_end = 0x1078,
 		.is_binned = 1,
 	}, {
 		/*
