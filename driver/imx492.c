@@ -1317,9 +1317,10 @@ static int imx492_start_streaming(struct imx492 *imx492)
 	 * reg_list.  Enabled when mode->htrimming_end > 0.
 	 *
 	 * Override the CSI-2 output-width register (0x3ED0) only for
-	 * unbinned HTRIMMING modes.  The binned mode determines its
-	 * own CSI-2 line width from the HTRIMMING window (matching
-	 * the IMX294 driver which never writes 0x3ED0).
+	 * unbinned HTRIMMING modes (e.g. the square crop).  The binned
+	 * mode's register table (from IMX294) omits all 0x3Exx
+	 * registers, letting the sensor auto-determine its CSI-2 line
+	 * width from the HTRIMMING window — matching IMX294 behavior.
 	 */
 	if (mode->htrimming_end > 0 && !mode->is_binned) {
 		ret = imx492_write_reg_2byte(imx492, 0x3ED0, mode->width);
@@ -1353,17 +1354,16 @@ static int imx492_start_streaming(struct imx492 *imx492)
 		return ret;
 
 	/*
-	 * Binned modes: HCOUNT1/2 must equal HMAX (per IMX294 datasheet).
-	 * Use default_HMAX here; the ctrl handler will set HMAX to match.
-	 * Unbinned modes: HCOUNT1/2 = 0 (don't care).
+	 * Binned modes: HCOUNT1/2 = 0x04B0 (1200), matching the IMX294
+	 * driver's common_regs.  Unbinned modes: HCOUNT1/2 = 0.
 	 */
 	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT1,
-				     mode->is_binned ? (u16)mode->default_HMAX : 0);
+				     mode->is_binned ? 0x04B0 : 0);
 	if (ret)
 		return ret;
 
 	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT2,
-				     mode->is_binned ? (u16)mode->default_HMAX : 0);
+				     mode->is_binned ? 0x04B0 : 0);
 	if (ret)
 		return ret;
 
