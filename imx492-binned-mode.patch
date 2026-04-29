@@ -1,0 +1,493 @@
+diff --git a/imx492.c b/imx492.c
+index a42fef6..9a9aace 100644
+--- a/imx492.c
++++ b/imx492.c
+@@ -182,6 +182,26 @@ struct imx492_mode {
+ 	u8 opb_size_v;
+ 	u16 write_vsize;
+ 	u16 y_out_size;
++
++	/*
++	 * Optional HTRIMMING / VWINPOS overrides.  If htrimming_end is
++	 * non-zero this mode uses the sensor's built-in horizontal crop
++	 * primitive (HTRIMMING_EN at 0x3035, START/END at 0x3036/0x3038)
++	 * plus the vertical window position register (VWINPOS at 0x30E0)
++	 * to crop a window out of the full pixel array without needing a
++	 * vendor-specific reg table.  The CSI-2 output width register at
++	 * 0x3ED0/0x3ED1 is also overwritten with mode->width when this
++	 * path is taken.
++	 *
++	 * Existing modes leave all three fields at 0 so they fall through
++	 * to the current hardcoded-zero behaviour.
++	 */
++	u16 htrimming_start;
++	u16 htrimming_end;
++	u16 vwinpos;
++
++	/* Set for 2×2 binned modes (affects HOPBOUT_EN, HCOUNT). */
++	u8 is_binned;
+ };
+ 
+ static const struct imx492_reg imx492_startup_pre_regs[] = {
+@@ -347,6 +367,127 @@ static const struct imx492_mode supported_modes_12bit[] = {
+ 		.opb_size_v = 0x20,
+ 		.write_vsize = 0x1630,
+ 		.y_out_size = 0x1610,
++	}, {
++		/*
++		 * 2×2 binned 12-bit mode: 3792×2840 output, 3704×2778 active.
++		 *
++		 * Ported from the IMX294 driver's mode_00 (full-array 2×2
++		 * binned readout).  The IMX492 and IMX294 share the same
++		 * die — the user confirmed dtoverlay=imx294 drives the
++		 * IMX492 cleanly in this mode at ~40 fps.
++		 *
++		 * Timing values (HMAX, VMAX, SHR, integration_offset) are
++		 * taken directly from the IMX294 mode_00 definition.
++		 * VMAX_scale=2 because each VMAX tick covers two sensor
++		 * rows in binned readout.
++		 */
++		.width = 3792,
++		.height = 2840,
++		.min_HMAX = 1730,
++		.min_VMAX = 1444,
++		.default_HMAX = 1875,
++		.default_VMAX = 1600,
++		.VMAX_scale = 2,
++		.min_SHR = 5,
++		.integration_offset = 551,
++		.crop = {
++			.left = 40,
++			.top = 24,
++			.width = 3704,
++			.height = 2778,
++		},
++		.reg_list = {
++			.num_of_regs = ARRAY_SIZE(imx492_binned_12bit_regs),
++			.regs = imx492_binned_12bit_regs,
++		},
++		.opb_size_v = 0x10,
++		.write_vsize = 0x0B18,
++		.y_out_size = 0x0B08,
++		.htrimming_start = 0x0030,
++		.htrimming_end = 0x0F00,
++		.is_binned = 1,
++	}, {
++		/*
++		 * Experimental 5616x5616 centered square mode (~31.5 MP).
++		 *
++		 * Uses the sensor's documented HTRIMMING + VWINPOS crop
++		 * primitives instead of the vendor-supplied wide_17_9 /
++		 * four_three register-table dance.  The all_pixel register
++		 * table is taken as-is; horizontal crop is applied by the
++		 * C driver via HTRIMMING_START/END, vertical offset via
++		 * VWINPOS, and output height via y_out_size / write_vsize.
++		 *
++		 * Geometry (centered on the 8240x5628 active area):
++		 *   horizontal: start = (8240-5616)/2 = 1312
++		 *               end   = 1312 + 5616   = 6928
++		 *   vertical:   vwinpos = (5628-5616)/2 = 6
++		 *
++		 * CSI-2 output dimensions (active + OPB padding, matching
++		 * the OPB ratios of the all_pixel mode):
++		 *   width       = 5616 + 192 horizontal OPB = 5808
++		 *   y_out_size  = 5616 + 20 dummy rows      = 5636 (0x1604)
++		 *   write_vsize = 5636 + 32 vertical OPB    = 5668 (0x1624)
++		 *
++		 * HMAX and VMAX MUST match the full-array mode's timing
++		 * (1202 / 5728).  This mode reuses imx492_all_pixel_12bit_regs,
++		 * which programs the sensor's pixel scanner for a full
++		 * 8432-wide readout — HTRIMMING only gates the output
++		 * formatter downstream, it doesn't shorten the physical
++		 * line-scan time.  A smaller HMAX (like the 4:3 mode's 1108)
++		 * truncates each line before the scanner finishes and
++		 * desyncs CSI-2 framing, producing per-line horizontal-band
++		 * garbage instead of a real image.  Lesson learned the
++		 * hard way during initial bring-up.
++		 *
++		 * The speedup this mode was originally chasing (lower frame
++		 * clock via reduced HMAX/VMAX) is therefore not available
++		 * with the all_pixel reg table.  The remaining wins are:
++		 *   (a) square framing in hardware, so the app doesn't have
++		 *       to crop a 2:3 frame to 1:1 every capture;
++		 *   (b) ~8% less memory bandwidth through the ISP because
++		 *       we're transporting 5808x5636 instead of 8432x5648.
++		 * Revisiting the speedup would require a dedicated reg
++		 * table that reconfigures the pixel scanner to actually
++		 * read fewer columns — see imx492_four_three_12bit_regs
++		 * for the shape that work would take.
++		 *
++		 * Caveats / things to validate in-field:
++		 *   - HTRIMMING_START/END encoding (pixel vs 2-pixel vs 8
++		 *     pixel units) may require the values to be doubled or
++		 *     halved.  Symptom: output is horizontally shifted or
++		 *     stretched.
++		 *   - VWINPOS encoding similarly — if frame is vertically
++		 *     off-center, try vwinpos = 3 or vwinpos = 12.
++		 *   - 0x3ED0/0x3ED1 override may or may not actually
++		 *     re-format the CSI-2 output width; if the output is
++		 *     garbled, the all_pixel reg table's 0x3ED0 value is
++		 *     load-bearing and this approach is wrong.
++		 */
++		.width = 5808,
++		.height = 5636,
++		.min_HMAX = 1202,
++		.min_VMAX = 5728,
++		.default_HMAX = 1202,
++		.default_VMAX = 5728,
++		.VMAX_scale = 1,
++		.min_SHR = 12,
++		.integration_offset = 256,
++		.crop = {
++			.left = 1312,
++			.top = 6,
++			.width = 5616,
++			.height = 5616,
++		},
++		.reg_list = {
++			.num_of_regs = ARRAY_SIZE(imx492_all_pixel_12bit_regs),
++			.regs = imx492_all_pixel_12bit_regs,
++		},
++		.opb_size_v = 0x20,
++		.write_vsize = 0x1624,
++		.y_out_size = 0x1604,
++		.htrimming_start = 1312,
++		.htrimming_end   = 6928,
++		.vwinpos         = 6,
+ 	},
+ };
+ 
+@@ -1162,31 +1303,61 @@ static int imx492_start_streaming(struct imx492 *imx492)
+ 		return ret;
+ 	}
+ 
+-	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HOPBOUT_EN, 0x01);
++	/*
++	 * Optional HTRIMMING / VWINPOS path for modes that want a
++	 * hardware crop window independent of the vendor-supplied
++	 * reg_list.  Enabled when mode->htrimming_end > 0.  Also
++	 * overrides the CSI-2 output-width register at 0x3ED0 with
++	 * mode->width so the framing matches the trimmed window.
++	 */
++	if (mode->htrimming_end > 0) {
++		ret = imx492_write_reg_2byte(imx492, 0x3ED0, mode->width);
++		if (ret)
++			return ret;
++	}
++
++	/*
++	 * Binned modes need HOPBOUT_EN=0 (horizontal output binning
++	 * disabled — the 2×2 binning is done in the pixel array, not
++	 * the output formatter).  Unbinned modes need HOPBOUT_EN=1.
++	 */
++	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HOPBOUT_EN,
++				     mode->is_binned ? 0x00 : 0x01);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN, 0x00);
++	ret = imx492_write_reg_1byte(imx492, IMX492_REG_HTRIMMING_EN,
++				     mode->htrimming_end > 0 ? 0x01 : 0x00);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_START,
++				     mode->htrimming_start);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HTRIMMING_END,
++				     mode->htrimming_end);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT1, 0x0000);
++	/*
++	 * Binned modes: HCOUNT1/2 must equal HMAX (per IMX294 datasheet).
++	 * Use default_HMAX here; the ctrl handler will set HMAX to match.
++	 * Unbinned modes: HCOUNT1/2 = 0 (don't care).
++	 */
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT1,
++				     mode->is_binned ? (u16)mode->default_HMAX : 0);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT2, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_HCOUNT2,
++				     mode->is_binned ? (u16)mode->default_HMAX : 0);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS, 0x0000);
++	ret = imx492_write_reg_2byte(imx492, IMX492_REG_VWINPOS,
++				     mode->vwinpos);
+ 	if (ret)
+ 		return ret;
+ 
+diff --git a/imx492_mode_tables.h b/imx492_mode_tables.h
+index 90ea48c..d54e40a 100644
+--- a/imx492_mode_tables.h
++++ b/imx492_mode_tables.h
+@@ -1078,6 +1078,260 @@ static const struct imx492_reg imx492_four_three_12bit_regs[] = {
+ 	{0x3EFC, 0x10},
+ };
+ 
++/*
++ * 2×2 binned 12-bit mode (3792×2840 output, 3704×2778 active).
++ *
++ * Derived from imx492_all_pixel_12bit_regs with MDSEL register
++ * overrides ported from the IMX294 mode_00 (full-array 2×2 binned
++ * 12-bit).  The IMX492 and IMX294 share the same die, so these
++ * registers are directly compatible.
++ *
++ * Changes vs all_pixel_12bit:
++ *   0x3004 MDSEL1  0x1C → 0x00  (unbinned → 2×2 binned full readout)
++ *   0x3006 MDSEL3  0x00 → 0x02  (full-sensor binned geometry)
++ *   0x3007 MDSEL4  0xA7 → 0xA0
++ *   0x3081 MDSEL7  0x00 → 0x01
++ *
++ * Registers added (from IMX294 mode_00, not present in all_pixel):
++ *   0x3019 MDVREV=0x00, 0x3030 MDSEL5=0x77, 0x3069 MDSEL15_H=0x00,
++ *   0x3080 MDSEL6=0x00, 0x30A8 MDSEL8=0x02, 0x30E2 VCUTMODE=0x00,
++ *   0x3600/3601 MDSEL16=0x0090, 0x3846/3847 MDSEL9=0x0000,
++ *   0x384A/384B MDSEL10=0x0000
++ *
++ * PLL, MIPI timing, and all other registers are kept from the
++ * IMX492 all_pixel_12bit table unchanged.
++ *
++ * HOPBOUT_EN, HTRIMMING, HCOUNT, OPB_SIZE_V, WRITE_VSIZE, and
++ * Y_OUT_SIZE are set by start_streaming(), not here.
++ */
++static const struct imx492_reg imx492_binned_12bit_regs[] = {
++	{0x3C00, 0x00},
++	{0x3C01, 0x00},
++	{0x3004, 0x00},  /* MDSEL1: 2×2 binned full readout */
++	{0x3005, 0x06},
++	{0x3006, 0x02},  /* MDSEL3: full-sensor binned geometry */
++	{0x3506, 0x56},
++	{0x3007, 0xA0},  /* MDSEL4 */
++	{0x3C08, 0x3F},
++	{0x300A, 0x00},
++	{0x300B, 0x00},
++	{0x340C, 0x6E},
++	{0x350C, 0x56},
++	{0x3C0C, 0x1B},
++	{0x350E, 0x58},
++	{0x3012, 0x00},
++	{0x3019, 0x00},  /* MDVREV */
++	{0x371C, 0x02},
++	{0x311F, 0x00},
++	{0x3122, 0x01},
++	{0x3123, 0x00},
++	{0x3124, 0x00},
++	{0x3125, 0x01},
++	{0x3127, 0x02},
++	{0x3129, 0x60},
++	{0x312A, 0x01},
++	{0x382B, 0x68},
++	{0x312D, 0x02},
++	{0x3030, 0x77},  /* MDSEL5 */
++	{0x312F, 0x20},
++	{0x332F, 0x00},
++	{0x372F, 0x3C},
++	{0x3130, 0x30},
++	{0x3730, 0x01},
++	{0x3131, 0x16},
++	{0x3132, 0x10},
++	{0x3732, 0xB8},
++	{0x3133, 0x16},
++	{0x3134, 0xAF},
++	{0x3234, 0x32},
++	{0x3734, 0x4A},
++	{0x3136, 0xC7},
++	{0x3736, 0x57},
++	{0x3836, 0x34},
++	{0x3138, 0x7F},
++	{0x3738, 0x4D},
++	{0x313A, 0x6F},
++	{0x313C, 0x6F},
++	{0x353D, 0x10},
++	{0x313E, 0xCF},
++	{0x3140, 0x77},
++	{0x3042, 0x32},
++	{0x3142, 0x5F},
++	{0x3043, 0x00},
++	{0x3A43, 0x00},
++	{0x3744, 0x0F},
++	{0x3745, 0x00},
++	{0x3146, 0x00},
++	{0x3047, 0x02},
++	{0x3248, 0xBC},
++	{0x3448, 0x7E},
++	{0x3549, 0x04},
++	{0x334C, 0x01},
++	{0x304E, 0x0B},
++	{0x304F, 0x2A},
++	{0x3250, 0xBC},
++	{0x3052, 0xEE},
++	{0x3352, 0x50},
++	{0x3A54, 0x00},
++	{0x3A55, 0x1E},
++	{0x3356, 0x4F},
++	{0x3258, 0xBC},
++	{0x335A, 0x79},
++	{0x375B, 0x01},
++	{0x355D, 0x03},
++	{0x335E, 0x56},
++	{0x355E, 0x03},
++	{0x3260, 0xBC},
++	{0x3360, 0x6A},
++	{0x3062, 0x25},
++	{0x3064, 0x78},
++	{0x3065, 0x33},
++	{0x3066, 0x64},
++	{0x3067, 0x71},
++	{0x3068, 0x1A},
++	{0x3069, 0x00},  /* MDSEL15 high byte */
++	{0x336A, 0x56},
++	{0x366A, 0x04},
++	{0x366B, 0x04},
++	{0x366C, 0x00},
++	{0x366D, 0x00},
++	{0x366E, 0x00},
++	{0x366F, 0x00},
++	{0x3670, 0x00},
++	{0x3671, 0x05},
++	{0x3274, 0x13},
++	{0x3574, 0x56},
++	{0x3276, 0x00},
++	{0x3676, 0x83},
++	{0x3277, 0x00},
++	{0x3677, 0x03},
++	{0x3678, 0x00},
++	{0x3679, 0x04},
++	{0x367A, 0x2C},
++	{0x367B, 0x05},
++	{0x327C, 0x13},
++	{0x367D, 0x06},
++	{0x327E, 0x00},
++	{0x367E, 0xFF},
++	{0x327F, 0x00},
++	{0x357F, 0x0C},
++	{0x367F, 0x06},
++	{0x3080, 0x00},  /* MDSEL6 */
++	{0x3580, 0x0A},
++	{0x3680, 0x4B},
++	{0x3E80, 0x14},
++	{0x3081, 0x01},  /* MDSEL7: binned readout */
++	{0x3581, 0x08},
++	{0x3E82, 0x30},
++	{0x3583, 0x72},
++	{0x3284, 0x13},
++	{0x3E84, 0x04},
++	{0x3E85, 0x01},
++	{0x3286, 0x00},
++	{0x3E86, 0x10},
++	{0x3287, 0x00},
++	{0x3587, 0x01},
++	{0x3E87, 0x16},
++	{0x3088, 0x75},
++	{0x3688, 0x05},
++	{0x3E88, 0x03},
++	{0x3E89, 0xFE},
++	{0x308A, 0x09},
++	{0x3E8A, 0x01},
++	{0x3E8B, 0x06},
++	{0x308C, 0x61},
++	{0x328C, 0x13},
++	{0x328E, 0x00},
++	{0x348E, 0x6F},
++	{0x3E8E, 0x03},
++	{0x328F, 0x00},
++	{0x3E8F, 0xFE},
++	{0x3690, 0x27},
++	{0x3E90, 0x01},
++	{0x3E91, 0x06},
++	{0x3492, 0x11},
++	{0x3692, 0x65},
++	{0x3694, 0x4F},
++	{0x3E94, 0x33},
++	{0x3E95, 0x01},
++	{0x3696, 0xA1},
++	{0x3E96, 0x19},
++	{0x3E98, 0x30},
++	{0x3E9A, 0x09},
++	{0x3E9B, 0x01},
++	{0x3E9C, 0x10},
++	{0x3E9D, 0x16},
++	{0x3E9E, 0xFE},
++	{0x3E9F, 0x03},
++	{0x3EA0, 0x06},
++	{0x3EA3, 0x01},
++	{0x3EA4, 0xFE},
++	{0x3EA5, 0x03},
++	{0x3EA6, 0x06},
++	{0x30A8, 0x02},  /* MDSEL8: 12-bit readout */
++	{0x3EA9, 0x33},
++	{0x3EAA, 0x00},
++	{0x3EAB, 0x08},
++	{0x3EAC, 0x08},
++	{0x3EAD, 0x01},
++	{0x32AE, 0x00},
++	{0x3EAE, 0x08},
++	{0x32AF, 0x00},
++	{0x3EAF, 0x08},
++	{0x3EB0, 0x00},
++	{0x3EB1, 0x10},
++	{0x3EB2, 0x10},
++	{0x38B3, 0x00},
++	{0x3EB3, 0x01},
++	{0x3EB4, 0x10},
++	{0x3EB5, 0x10},
++	{0x34B6, 0xFF},
++	{0x3EB6, 0x00},
++	{0x34B7, 0x01},
++	{0x3EB7, 0x00},
++	{0x34B8, 0xFF},
++	{0x3EB8, 0x00},
++	{0x34B9, 0x01},
++	{0x3EB9, 0x00},
++	{0x3EBA, 0x00},
++	{0x3EBB, 0x00},
++	{0x3EC0, 0x54},
++	{0x34C4, 0x5A},
++	{0x3AC4, 0x00},
++	{0x32CA, 0x5A},
++	{0x3ECC, 0x04},
++	{0x3ECD, 0x04},
++	{0x30E2, 0x00},  /* VCUTMODE */
++	{0x35D0, 0x5E},
++	{0x3ED0, 0xF0},
++	{0x3ED1, 0x20},
++	{0x3ED2, 0x0B},
++	{0x3ED3, 0x04},
++	{0x35D4, 0x63},
++	{0x3ED5, 0x13},
++	{0x33D6, 0x79},
++	{0x3ED6, 0x00},
++	{0x3ED9, 0x0F},
++	{0x3EE4, 0x02},
++	{0x30E5, 0x00},
++	{0x3EE5, 0x02},
++	{0x3EE7, 0x00},
++	{0x31E8, 0xA0},
++	{0x31E9, 0x00},
++	{0x30EF, 0x01},
++	{0x3600, 0x90},  /* MDSEL16 low */
++	{0x3601, 0x00},  /* MDSEL16 high */
++	{0x31F5, 0x01},
++	{0x3EF6, 0x00},
++	{0x3EF8, 0x10},
++	{0x3EFA, 0x00},
++	{0x3EFC, 0x10},
++	{0x3846, 0x00},  /* MDSEL9 low */
++	{0x3847, 0x00},  /* MDSEL9 high */
++	{0x384A, 0x00},  /* MDSEL10 low */
++	{0x384B, 0x00},  /* MDSEL10 high */
++};
++
+ static const struct imx492_reg imx492_four_three_10bit_regs[] = {
+ 	{0x3C00, 0x01},
+ 	{0x3C01, 0x01},
