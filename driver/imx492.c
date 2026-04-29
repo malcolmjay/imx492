@@ -497,45 +497,6 @@ static const struct imx492_mode supported_modes_12bit[] = {
 	},
 };
 
-static const struct imx492_mode supported_modes_14bit[] = {
-	{
-		/*
-		 * 2×2 binned 14-bit mode: 3792×2840 output, 3704×2778 active.
-		 *
-		 * Same geometry and timing as the 12-bit binned mode, but uses
-		 * the sensor's 14-bit ADC path (MDSEL2=0x0B, MDSEL8=0x03).
-		 * Higher bit depth costs ~14 % framerate vs 12-bit at the same
-		 * MIPI link frequency, matching the IMX294 driver's
-		 * mode_00_14bit definition.
-		 */
-		.width = 3792,
-		.height = 2840,
-		.min_HMAX = 1730,
-		.min_VMAX = 1444,
-		.default_HMAX = 1875,
-		.default_VMAX = 1600,
-		.VMAX_scale = 2,
-		.min_SHR = 5,
-		.integration_offset = 551,
-		.crop = {
-			.left = 80,
-			.top = 48,
-			.width = 7408,
-			.height = 5556,
-		},
-		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(imx492_binned_14bit_regs),
-			.regs = imx492_binned_14bit_regs,
-		},
-		.opb_size_v = 0x10,
-		.write_vsize = 0x0B18,
-		.y_out_size = 0x0B08,
-		.htrimming_start = 0x0030,
-		.htrimming_end = 0x0F00,
-		.is_binned = 1,
-	},
-};
-
 /*
  * The supported formats.
  * This table MUST contain 4 entries per format, to cover the various flip
@@ -556,17 +517,11 @@ static const u32 codes[] = {
 	MEDIA_BUS_FMT_SGRBG12_1X12,
 	MEDIA_BUS_FMT_SGBRG12_1X12,
 	MEDIA_BUS_FMT_SBGGR12_1X12,
-	/* 14-bit modes. */
-	MEDIA_BUS_FMT_SRGGB14_1X14,
-	MEDIA_BUS_FMT_SGRBG14_1X14,
-	MEDIA_BUS_FMT_SGBRG14_1X14,
-	MEDIA_BUS_FMT_SBGGR14_1X14,
 };
 
 static const u32 mono_codes[] = {
 	MEDIA_BUS_FMT_Y10_1X10,
 	MEDIA_BUS_FMT_Y12_1X12,
-	MEDIA_BUS_FMT_Y14_1X14,
 };
 
 static const s64 imx492_link_freq_menu[] = {
@@ -688,14 +643,6 @@ static inline void get_mode_table(unsigned int code,
 		*mode_list = supported_modes_12bit;
 		*num_modes = ARRAY_SIZE(supported_modes_12bit);
 		break;
-	case MEDIA_BUS_FMT_SBGGR14_1X14:
-	case MEDIA_BUS_FMT_SGBRG14_1X14:
-	case MEDIA_BUS_FMT_SGRBG14_1X14:
-	case MEDIA_BUS_FMT_SRGGB14_1X14:
-	case MEDIA_BUS_FMT_Y14_1X14:
-		*mode_list = supported_modes_14bit;
-		*num_modes = ARRAY_SIZE(supported_modes_14bit);
-		break;
 	default:
 		*mode_list = NULL;
 		*num_modes = 0;
@@ -717,12 +664,6 @@ static u32 imx492_get_format_bpp(u32 code)
 	case MEDIA_BUS_FMT_SRGGB12_1X12:
 	case MEDIA_BUS_FMT_Y12_1X12:
 		return 12;
-	case MEDIA_BUS_FMT_SBGGR14_1X14:
-	case MEDIA_BUS_FMT_SGBRG14_1X14:
-	case MEDIA_BUS_FMT_SGRBG14_1X14:
-	case MEDIA_BUS_FMT_SRGGB14_1X14:
-	case MEDIA_BUS_FMT_Y14_1X14:
-		return 14;
 	default:
 		return 12;
 	}
@@ -847,19 +788,12 @@ static u32 imx492_default_format_code(const struct imx492 *imx492, u32 code)
 {
 	u32 bpp = imx492_get_format_bpp(code);
 
-	if (imx492->mono) {
-		switch (bpp) {
-		case 10: return MEDIA_BUS_FMT_Y10_1X10;
-		case 14: return MEDIA_BUS_FMT_Y14_1X14;
-		default: return MEDIA_BUS_FMT_Y12_1X12;
-		}
-	}
+	if (imx492->mono)
+		return bpp == 10 ? MEDIA_BUS_FMT_Y10_1X10 :
+				   MEDIA_BUS_FMT_Y12_1X12;
 
-	switch (bpp) {
-	case 10: return MEDIA_BUS_FMT_SRGGB10_1X10;
-	case 14: return MEDIA_BUS_FMT_SRGGB14_1X14;
-	default: return MEDIA_BUS_FMT_SRGGB12_1X12;
-	}
+	return bpp == 10 ? MEDIA_BUS_FMT_SRGGB10_1X10 :
+			   MEDIA_BUS_FMT_SRGGB12_1X12;
 }
 
 static u32 imx492_get_format_code(struct imx492 *imx492, u32 code)
