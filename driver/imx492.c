@@ -322,6 +322,39 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.write_vsize = 0x1630,
 		.y_out_size = 0x1610,
 	}, {
+		/*
+		 * Unbinned 12-bit, effective pixels only: 8336×5648.
+		 *
+		 * Uses HTRIMMING to crop the 8432-wide all-pixel readout
+		 * down to the 8336 effective pixels specified in the
+		 * IMX492 datasheet, removing 48 non-effective columns
+		 * on each side.
+		 */
+		.width = 8336,
+		.height = 5648,
+		.min_HMAX = 1202,
+		.min_VMAX = 5728,
+		.default_HMAX = 1202,
+		.default_VMAX = 5728,
+		.VMAX_scale = 1,
+		.min_SHR = 12,
+		.integration_offset = 256,
+		.crop = {
+			.left = 0,
+			.top = 0,
+			.width = 8240,
+			.height = 5628,
+		},
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(imx492_all_pixel_12bit_regs),
+			.regs = imx492_all_pixel_12bit_regs,
+		},
+		.opb_size_v = 0x20,
+		.write_vsize = 0x1630,
+		.y_out_size = 0x1610,
+		.htrimming_start = 0x0030,
+		.htrimming_end = 0x20C0,
+	}, {
 		.width = 8432,
 		.height = 4348,
 		.min_HMAX = 1202,
