@@ -112,7 +112,7 @@ echo ""
 echo "After reboot, verify with:"
 echo "  libcamera-hello --list-cameras"
 echo ""
-echo "You should see a 3792x2840 R12_CSI2P mode at ~35 fps."
+echo "You should see a 3792x2824 R12_CSI2P mode at ~35 fps."
 echo ""
 
 sudo reboot

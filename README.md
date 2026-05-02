@@ -21,7 +21,7 @@ Based on the upstream driver by [will127534](https://github.com/will127534/imx49
 | 8432×5648  | Full array          | ~10 fps     |
 | 8432×4348  | 17:9 crop           | ~14 fps     |
 | 7680×5648  | 4:3 crop            | ~11 fps     |
-| **3792×2840** | **2×2 binned (new)** | **~35 fps** |
+| **3792×2824** | **2×2 binned (new)** | **~35 fps** |
 | 5808×5636  | Square 1:1 crop     | ~10 fps     |
 
 The binned mode is the primary addition. It reads the full sensor area with 2×2 pixel binning, producing a ~10.8 MP output at significantly higher frame rates than any unbinned mode.
@@ -89,12 +89,12 @@ After reboot, list the available camera modes:
 libcamera-hello --list-cameras
 ```
 
-You should see the 3792×2840 R12_CSI2P mode listed among the available modes.
+You should see the 3792×2824 R12_CSI2P mode listed among the available modes.
 
 ### Test the Binned Mode
 
 ```bash
-libcamera-hello -t 10000 --mode 3792:2840:12:P --viewfinder-width 1264 --viewfinder-height 948
+libcamera-hello -t 10000 --mode 3792:2824:12:P --viewfinder-width 1264 --viewfinder-height 942
 ```
 
 ### Cleanup (Remove Old Driver Versions)

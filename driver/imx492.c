@@ -382,7 +382,7 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		 * rows in binned readout.
 		 */
 		.width = 3792,
-		.height = 2840,
+		.height = 2824,
 		.min_HMAX = 1730,
 		.min_VMAX = 1444,
 		.default_HMAX = 1875,
