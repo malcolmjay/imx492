@@ -414,40 +414,6 @@ static const struct imx492_mode supported_modes_12bit[] = {
 		.is_binned = 1,
 	}, {
 		/*
-		 * 2×2 binned 12-bit mode: 4168×2824, full effective width.
-		 *
-		 * Same readout as the 3792-wide binned mode but with the
-		 * HTRIMMING window expanded to cover all 4168 effective
-		 * binned pixels (8336 effective unbinned / 2, per the
-		 * IMX492 datasheet).
-		 */
-		.width = 4168,
-		.height = 2824,
-		.min_HMAX = 1730,
-		.min_VMAX = 1444,
-		.default_HMAX = 1875,
-		.default_VMAX = 1600,
-		.VMAX_scale = 2,
-		.min_SHR = 5,
-		.integration_offset = 551,
-		.crop = {
-			.left = 0,
-			.top = 48,
-			.width = 8240,
-			.height = 5556,
-		},
-		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(imx492_binned_12bit_regs),
-			.regs = imx492_binned_12bit_regs,
-		},
-		.opb_size_v = 0x10,
-		.write_vsize = 0x0B18,
-		.y_out_size = 0x0B08,
-		.htrimming_start = 0x0018,
-		.htrimming_end = 0x1060,
-		.is_binned = 1,
-	}, {
-		/*
 		 * Experimental 5616x5616 centered square mode (~31.5 MP).
 		 *
 		 * Uses the sensor's documented HTRIMMING + VWINPOS crop
